@@ -3,7 +3,7 @@
 <package format="3">
   <name>vln_behavior_tree</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>VLN navigation behavior trees and reusable event reporting BT nodes.</description>
   <maintainer email="3304257104@qq.com">root</maintainer>
   <license>TODO: License declaration</license>
 
@@ -13,7 +13,11 @@
   <depend>nav2_bt_navigator</depend>
   <depend>nav2_core</depend>
   <depend>nav2_behavior_tree</depend>
+  <depend>behaviortree_cpp_v3</depend>
+  <depend>nlohmann_json</depend>
+  <depend>std_msgs</depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
