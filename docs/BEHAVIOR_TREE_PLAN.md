@@ -20,8 +20,8 @@ Event 节点只做一件事：**把输入数据组装成 Event，发布给现有
 
 每次执行的流程：
 
-1. 调用 `buildPayload()`，根据输入数据构建完整业务 payload，包括公共字段。
-2. 将 payload 包装为现有 EventManager 接收的消息格式。
+1. 调用 `buildPayload()`，根据输入数据构建业务 payload，并完成图片 Base64 编码与元数据转换。
+2. 将返回的业务数据和已编码图片整体包装为现有 EventManager 接收的消息格式。
 3. 发布到配置的话题，正常返回 `SUCCESS`；输入解析或发布发生异常时记录日志并返回 `FAILURE`。
 
 `SUCCESS` 表示本次本地发布调用完成。节点不等待接收回执或模型处理结果。
@@ -35,7 +35,7 @@ Event 节点只做一件事：**把输入数据组装成 Event，发布给现有
 | `topic` | string | 上报话题，默认 `/vln/robot_event` |
 | `event` | string | 事件类型，默认 `status` |
 | `text` | string | 事件说明文字 |
-| `image_content` | JSON 数组，可选 | 已准备好的原生图片内容项；没有图片时为空 |
+| `image_content` | `ImageContent`，可选 | 图片字节数组及完全由提供方定义的元数据 map |
 
 动作状态、传感器等业务数据通过派生类定义的输入端口传入，统一在 `buildPayload()` 中组织为事件内容。
 
@@ -58,7 +58,13 @@ Event 节点只做一件事：**把输入数据组装成 Event，发布给现有
 
 `buildPayload()` 同时填写公共字段：`source` 为 `robot`，`time_stamp` 默认使用当前 UTC 毫秒时间，`origin` 默认使用节点实例名。事件发生时间、位姿和图片元数据等按输入数据在该函数中组装。
 
-图片内容通过 `image_content` 输入，每项可附带 `camera`、`time_stamp`，由 `buildPayload()` 按顺序填写到 `payload.images`。消息包装时，图片项中的采样元数据移入业务字段，原生图片内容追加到 `content`。
+`ImageContent` 包含 `std::vector<Image>`；每个 `Image` 保存图片文件字节
+`std::vector<unsigned char>`、自定义元数据 `std::map<std::string, MetadataValue>` 和
+`mime_type`。元数据值支持文字、布尔、整数和浮点数，键名由提供方决定。
+
+`buildPayload()` 读取该对象，将完整元数据 map 按顺序转换为业务 `images`，
+将字节编码为对应的 `input_image`。上游通过标准 C++ 容器填写数据。
+图片数据结构定义见 `include/vln_behavior_tree/image_content.hpp`。
 
 ## 4. 基类接口草案
 
@@ -72,8 +78,8 @@ public:
   static BT::PortsList providedPorts();
 
 protected:
-  // 根据输入数据构建完整的 Event 业务 payload。
-  virtual Json buildPayload();
+  // 构建业务数据，并编码图片及其自定义元数据。
+  virtual EventPayload buildPayload();
 
 private:
   BT::NodeStatus tick() override;
@@ -84,9 +90,9 @@ private:
 };
 ```
 
-构造时从 Nav2 黑板的 `node` 获取宿主 ROS 节点，发布器按 `topic` 创建并复用。JSON 使用本包直接声明的库依赖。
+构造时从 Nav2 黑板的 `node` 获取宿主 ROS 节点，发布器按 `topic` 创建并复用。时间和 Base64 编码复用 `vln_agent_utils`。
 
-基类的 `buildPayload()` 根据公共输入端口构建 payload，`tick()` 负责调用该函数、包装消息并发布。派生类可增加输入端口并重写 `buildPayload()`，例如把传入的错误码与动作名组合成一条导航失败消息。所有 Event payload 均在 `buildPayload()` 中构建。
+`EventPayload` 包含业务 JSON `business` 和已编码图片数组 `image_content`。基类的 `buildPayload()` 统一读取和转换输入；`tick()` 将业务数据作为首个文字项插入已构建的内容数组，再整体封装发布。派生类可增加输入端口并重写 `buildPayload()`，例如把传入的错误码与动作名组合成一条导航失败消息。所有 Event payload 均在 `buildPayload()` 中构建。
 
 ## 5. 对接现有 EventManager
 
@@ -95,13 +101,10 @@ private:
 String 的内容按现有约定包装，不直接发送裸业务对象：
 
 ```cpp
-Json content = Json::array({
-  {{"type", "input_text"}, {"text", payload.dump()}}
-});
-for (const auto & image : image_content) {
-  content.push_back(image);
-}
-Json message = {{"role", "user"}, {"content", content}};
+auto event = buildPayload();
+Json text = {{"type", "input_text"}, {"text", event.business.dump()}};
+event.image_content.insert(event.image_content.begin(), text);
+Json message = {{"role", "user"}, {"content", std::move(event.image_content)}};
 // 将 message.dump() 放入 std_msgs::msg::String::data 后发布。
 ```
 
@@ -131,6 +134,7 @@ Json message = {{"role", "user"}, {"content", content}};
 主要文件保持为：
 
 ```text
+include/vln_behavior_tree/image_content.hpp
 include/vln_behavior_tree/event_node_base.hpp
 src/event_node_base.cpp
 ```
@@ -142,3 +146,5 @@ src/event_node_base.cpp
 ## 8. 实现记录
 
 2026-10-31：已实现 `EventNodeBase` 并注册为 `SubmitEvent`，提供可导出的基础库、头文件和动态插件。开发机 Humble / BehaviorTree.CPP 3.8.7 下 Release 编译、6 项功能测试和 4 项静态检查通过；安装后独立消费者的派生类链接与动态插件加载验证通过。
+
+2026-10-31 图片输入更新：新增 `ImageContent`，由图片文件字节、任意键名元数据 map 和媒体类型组成。`buildPayload()` 返回 `EventPayload`，统一完成 Base64 编码和完整元数据转换；时间与编码复用 `vln_agent_utils`。开发机 7 项功能测试、4 项静态检查及安装后独立消费者验证通过。

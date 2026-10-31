@@ -13,6 +13,7 @@ find_package(nav2_behavior_tree REQUIRED)
 find_package(behaviortree_cpp_v3 REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(vln_agent REQUIRED)
 
 add_library(vln_submit_event_bt_node SHARED src/event_node_base.cpp)
 target_compile_features(vln_submit_event_bt_node PUBLIC cxx_std_17)
@@ -22,7 +23,9 @@ target_include_directories(vln_submit_event_bt_node PUBLIC
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(vln_submit_event_bt_node PUBLIC
   behaviortree_cpp_v3 rclcpp std_msgs)
-target_link_libraries(vln_submit_event_bt_node PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(vln_submit_event_bt_node
+  PUBLIC nlohmann_json::nlohmann_json
+  PRIVATE vln_agent::vln_agent_utils)
 
 install(TARGETS vln_submit_event_bt_node
   EXPORT export_vln_event_nodes
@@ -49,5 +52,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
-ament_export_dependencies(behaviortree_cpp_v3 nlohmann_json rclcpp std_msgs)
+ament_export_dependencies(behaviortree_cpp_v3 nlohmann_json rclcpp std_msgs vln_agent)
 ament_package()

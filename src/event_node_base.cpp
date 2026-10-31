@@ -1,38 +1,16 @@
 #include "vln_behavior_tree/event_node_base.hpp"
 
-#include <chrono>
-#include <ctime>
 #include <exception>
-#include <iomanip>
-#include <locale>
-#include <sstream>
-#include <stdexcept>
 #include <utility>
 
 #include <behaviortree_cpp_v3/bt_factory.h>
+#include <vln_agent/utils/base64.hpp>
+#include <vln_agent/utils/time.hpp>
 
 namespace vln_behavior_tree
 {
 namespace
 {
-std::string utcNow()
-{
-  using namespace std::chrono;
-  const auto now = system_clock::now().time_since_epoch();
-  const auto seconds_part = floor<seconds>(now);
-  const auto milliseconds_part = duration_cast<milliseconds>(now - seconds_part).count();
-  const auto raw = static_cast<std::time_t>(seconds_part.count());
-  std::tm utc{};
-  if (!gmtime_r(&raw, &utc)) {
-    throw std::runtime_error("UTC 时间无法格式化");
-  }
-  std::ostringstream text;
-  text.imbue(std::locale::classic());
-  text << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S.")
-       << std::setfill('0') << std::setw(3) << milliseconds_part << 'Z';
-  return text.str();
-}
-
 template<typename T>
 T readInput(const BT::TreeNode & node, const std::string & port)
 {
@@ -60,39 +38,43 @@ EventNodeBase::EventNodeBase(
 
 BT::PortsList EventNodeBase::providedPorts()
 {
-  auto images = BT::InputPort<Json>("image_content", "原生图片内容数组，可附带 camera/time_stamp");
-  images.second.setDefaultValue("[]");
   return {
     BT::InputPort<std::string>("topic", "/vln/robot_event", "机器事件接收话题"),
-    BT::InputPort<std::string>("event", "status", "事件类型"),
-    BT::InputPort<std::string>("text", "", "事件说明文字"),
-    std::move(images)};
+    BT::InputPort<std::string>("event", "status", "Json字段：事件类型"),
+    BT::InputPort<std::string>("text", "", "Json字段：事件说明文字"),
+    BT::InputPort<ImageContent>("image_content", "图片字节数组及自定义元数据")};
 }
 
-Json EventNodeBase::buildPayload()
+EventPayload EventNodeBase::buildPayload()
 {
-  Json payload{{"source", "robot"}, {"time_stamp", utcNow()}, {"origin", name()},
+  EventPayload result;
+  auto & payload = result.business;
+  payload = {{"source", "robot"}, {"time_stamp", vln_agent::utils::utcNow()}, {"origin", name()},
     {"event", readInput<std::string>(*this, "event")}};
   // BT 3.8 会省略空字符串默认端口的映射。
   const auto text = config().input_ports.count("text") ?
     readInput<std::string>(*this, "text") : std::string();
   if (!text.empty()) {payload["text"] = text;}
 
-  const auto images = readInput<Json>(*this, "image_content");
-  if (!images.is_array()) {
-    throw BT::RuntimeError("image_content 应为 JSON 数组");
-  }
-  if (!images.empty()) {
-    payload["images"] = Json::array();
-    for (const auto & image : images) {
+  if (config().input_ports.count("image_content")) {
+    const auto input = readInput<ImageContent>(*this, "image_content");
+    if (!input.images.empty()) {payload["images"] = Json::array();}
+    for (const auto & image : input.images) {
+      if (image.bytes.empty()) {
+        throw BT::RuntimeError("图片字节数组为空");
+      }
       Json metadata = Json::object();
-      for (const auto * field : {"camera", "time_stamp"}) {
-        if (image.contains(field)) {metadata[field] = image.at(field);}
+      for (const auto & field : image.metadata) {
+        std::visit([&](const auto & value) {metadata[field.first] = value;}, field.second);
       }
       payload["images"].push_back(std::move(metadata));
+      result.image_content.push_back(
+        {{"type", "input_image"},
+          {"image_url", "data:" + image.mime_type + ";base64," +
+            vln_agent::utils::encodeBase64(image.bytes)}, {"detail", "auto"}});
     }
   }
-  return payload;
+  return result;
 }
 
 BT::NodeStatus EventNodeBase::tick()
@@ -105,24 +87,10 @@ BT::NodeStatus EventNodeBase::tick()
     return BT::NodeStatus::FAILURE;
   }
   try {
-    const auto payload = buildPayload();
-    Json content = Json::array({{{"type", "input_text"}, {"text", payload.dump()}}});
-    const auto images = readInput<Json>(*this, "image_content");
-    if (!images.is_array()) {
-      throw BT::RuntimeError("image_content 应为 JSON 数组");
-    }
-    for (auto image : images) {
-      // 采样元数据已进入业务 payload，图片项只保留原生内容字段。
-      if (!image.is_object() || image.value("type", std::string()) != "input_image" ||
-        !image.contains("image_url") || !image.at("image_url").is_string())
-      {
-        throw BT::RuntimeError("image_content 的每项应包含 input_image 类型和 image_url");
-      }
-      image.erase("camera");
-      image.erase("time_stamp");
-      content.push_back(std::move(image));
-    }
-    const Json message{{"role", "user"}, {"content", std::move(content)}};
+    auto event = buildPayload();
+    const Json text{{"type", "input_text"}, {"text", event.business.dump()}};
+    event.image_content.insert(event.image_content.begin(), text);
+    const Json message{{"role", "user"}, {"content", std::move(event.image_content)}};
     std_msgs::msg::String output;
     output.data = message.dump();
 

@@ -28,12 +28,26 @@ public:
   }
 
 protected:
-  Json buildPayload() override
+  EventPayload buildPayload() override
   {
     auto payload = EventNodeBase::buildPayload();
-    payload["data"] = {{"action", getInput<std::string>("action").value()},
+    payload.business["data"] = {{"action", getInput<std::string>("action").value()},
       {"distance_remaining_m", getInput<double>("distance_remaining_m").value()}};
     return payload;
+  }
+};
+
+class SnapshotEventNode : public EventNodeBase
+{
+public:
+  using EventNodeBase::EventNodeBase;
+
+protected:
+  EventPayload buildPayload() override
+  {
+    auto event = EventNodeBase::buildPayload();
+    config().blackboard->set("pictures", ImageContent{});
+    return event;
   }
 };
 
@@ -143,67 +157,97 @@ TEST_F(EventNodeTest, DerivedNodeBuildsBusinessPayloadFromTypedInputs)
   EXPECT_FALSE(report.contains("text"));
 }
 
-TEST_F(EventNodeTest, ImagesKeepOrderAndMetadataWithoutChangingInput)
+TEST_F(EventNodeTest, EncodesImageBytesAndAllCustomMetadataWithoutChangingInput)
 {
   subscribe();
-  const Json native_front{{"type", "input_image"},
-    {"image_url", "data:image/jpeg;base64,AA=="}, {"detail", "auto"}};
-  const Json native_rear{{"type", "input_image"},
-    {"image_url", "data:image/png;base64,AQ=="}};
-  auto front = native_front;
-  front["camera"] = "front";
-  front["time_stamp"] = "2026-10-31T06:00:00.123Z";
-  const auto images = Json::array({front, native_rear});
-  blackboard->set("pictures", images);
+  ImageContent pictures;
+  pictures.images.push_back(
+    {{0, 1, 2},
+      {{"label", std::string("door")}, {"sequence", std::int64_t{7}},
+        {"score", 0.97}, {"usable", true}, {"image_url", std::string("custom metadata")}},
+      "image/jpeg"});
+  pictures.images.push_back({{4, 5}, {}, "image/png"});
+  blackboard->set("pictures", pictures);
   auto bt = tree("<SubmitEvent image_content='{pictures}'/>");
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitMessages(1));
   const auto & content = received[0].at("content");
   ASSERT_EQ(content.size(), 3);
-  EXPECT_EQ(content.at(1), native_front);
-  EXPECT_EQ(content.at(2), native_rear);
   EXPECT_EQ(
-    payload().at("images"), Json::array(
-    {
-      Json{{"camera", "front"}, {"time_stamp", "2026-10-31T06:00:00.123Z"}},
-      Json::object()}));
-  EXPECT_EQ(blackboard->get<Json>("pictures"), images);
+    content.at(1), (Json{{"type", "input_image"},
+      {"image_url", "data:image/jpeg;base64,AAEC"}, {"detail", "auto"}}));
+  EXPECT_EQ(
+    content.at(2), (Json{{"type", "input_image"},
+      {"image_url", "data:image/png;base64,BAU="}, {"detail", "auto"}}));
+  const auto metadata = payload().at("images");
+  ASSERT_EQ(metadata.size(), 2);
+  EXPECT_EQ(
+    metadata.at(0), (Json{{"label", "door"}, {"sequence", 7}, {"score", 0.97},
+      {"usable", true}, {"image_url", "custom metadata"}}));
+  EXPECT_TRUE(metadata.at(0).at("sequence").is_number_integer());
+  EXPECT_TRUE(metadata.at(0).at("score").is_number_float());
+  EXPECT_TRUE(metadata.at(0).at("usable").is_boolean());
+  EXPECT_EQ(metadata.at(1), Json::object());
+  const auto original = blackboard->get<ImageContent>("pictures");
+  ASSERT_EQ(original.images.size(), pictures.images.size());
+  EXPECT_EQ(original.images.at(0).bytes, pictures.images.at(0).bytes);
+  EXPECT_EQ(original.images.at(0).metadata, pictures.images.at(0).metadata);
 }
 
-TEST_F(EventNodeTest, ParsesJsonTextAndResolvesUpdatedTopic)
+TEST_F(EventNodeTest, ReadsImageInputOnlyWhileBuildingPayload)
+{
+  subscribe();
+  factory.registerNodeType<SnapshotEventNode>("SnapshotEvent");
+  ImageContent pictures;
+  pictures.images.push_back({{1}, {{"sample", std::int64_t{42}}}, "image/png"});
+  blackboard->set("pictures", pictures);
+  auto bt = tree("<SnapshotEvent image_content='{pictures}'/>");
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitMessages(1));
+  EXPECT_TRUE(blackboard->get<ImageContent>("pictures").images.empty());
+  EXPECT_EQ(received[0].at("content").size(), 2);
+  EXPECT_EQ(received[0].at("content").at(1).at("image_url"), "data:image/png;base64,AQ==");
+  EXPECT_EQ(payload().at("images").at(0), (Json{{"sample", 42}}));
+}
+
+TEST_F(EventNodeTest, ResolvesUpdatedTopicAndImageInput)
 {
   subscribe("/event_node_test/first");
   subscribe("/event_node_test/second");
   blackboard->set("destination", std::string("/event_node_test/first"));
-  auto bt = tree(
-    R"(<SubmitEvent topic="{destination}"
-    image_content='[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]'/>)");
+  ImageContent pictures;
+  pictures.images.push_back({{1}, {}, "image/png"});
+  blackboard->set("pictures", pictures);
+  auto bt = tree("<SubmitEvent topic='{destination}' image_content='{pictures}'/>");
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitMessages(1));
   EXPECT_EQ(received[0].at("content").size(), 2);
   EXPECT_EQ(node->count_publishers("/event_node_test/first"), 1);
   blackboard->set("destination", std::string("/event_node_test/second"));
+  pictures.images.at(0).bytes = {4, 5};
+  blackboard->set("pictures", pictures);
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitMessages(2));
   EXPECT_EQ(node->count_publishers("/event_node_test/second"), 1);
+  EXPECT_EQ(received[1].at("content").at(1).at("image_url"), "data:image/png;base64,BAU=");
 }
 
 TEST_F(EventNodeTest, InvalidInputFailsAndCanBeCorrectedOnNextExecution)
 {
   subscribe();
-  blackboard->set("pictures", Json::object());
+  ImageContent pictures;
+  pictures.images.push_back({{}, {}, "image/png"});
+  blackboard->set("pictures", pictures);
   auto bt = tree("<SubmitEvent image_content='{pictures}'/>");
   EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::FAILURE);
   EXPECT_TRUE(received.empty());
-  blackboard->set("pictures", Json::array({Json{{"type", "input_image"}}}));
-  EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::FAILURE);
-  blackboard->set("pictures", Json::array());
+  blackboard->set("pictures", ImageContent{});
   EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitMessages(1));
   EXPECT_FALSE(payload().contains("images"));
 
-  auto bad_json = tree("<SubmitEvent image_content='[invalid]'/>");
-  EXPECT_EQ(bad_json.tickRoot(), BT::NodeStatus::FAILURE);
+  auto missing_images = tree("<SubmitEvent image_content='{missing_pictures}'/>");
+  EXPECT_EQ(missing_images.tickRoot(), BT::NodeStatus::FAILURE);
   auto bad_topic = tree("<SubmitEvent topic='invalid topic'/>");
   EXPECT_EQ(bad_topic.tickRoot(), BT::NodeStatus::FAILURE);
   auto missing_input = tree("<SubmitEvent text='{missing_description}'/>");
