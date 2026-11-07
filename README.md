@@ -1,6 +1,6 @@
 # vln_behavior_tree
 
-VLN 导航行为树及 Event 上报节点。`SubmitEvent` 从输入构建事件并发布给
+VLN 导航行为树、Event 上报及 Agent 工具调用节点。`SubmitEvent` 从输入构建事件并发布给
 EventManager，业务 JSON、图片元数据和 Base64 编码统一在 `buildPayload()` 中完成。
 
 ## 使用
@@ -132,6 +132,75 @@ EventPayload buildPayload() override
 派生插件使用 `find_package(vln_behavior_tree REQUIRED)` 并链接
 `vln_behavior_tree::vln_submit_event_bt_node`，按 BehaviorTree.CPP 方式注册。
 
+## 工具调用节点
+
+`CallToolNodeBase` 继承 Nav2 的 `BtServiceNode<vln_agent::srv::ToolCall>`，
+注册为通用 `CallTool` 节点。将 `vln_call_tool_bt_node` 追加到 Nav2 的
+`plugin_lib_names`，并启动已提供 ToolCall 服务的 Agent：
+
+```xml
+<CallTool name="ReadLocalMap"
+          tool="get_surroundings"
+          arguments='{"costmap":"local","range_m":10.0}'
+          result="{surroundings}"/>
+```
+
+| 端口 | 方向 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| tool | 输入 | 由调用方提供 | Agent 中启用的工具函数名 |
+| arguments | 输入 | {} | 参数 JSON 字符串，可写在 XML 或通过黑板传入 |
+| service_name | 输入 | /vln/tool_call | 沿用 Nav2 的服务端口 |
+| server_timeout | 输入 | 5000 | 等待本次完整工具结果的时限，单位毫秒 |
+| result | 输出 | 本次开始时清空 | vln_agent::ToolResult，含 payload 和 images |
+
+基类在每次请求开始时读取输入、生成独立的 robot_bt_ 调用 ID，并构建 Agent 服务
+所需的 completed/function_call 请求。等待服务响应期间返回 RUNNING；取得结果后，
+`result.payload` 保留 source/time_stamp/ok/data/pose/images 等业务信息，
+`result.images` 保留原生 input_image 图片数组及已有的 Base64 内容。
+
+默认以 payload.ok 决定 SUCCESS/FAILURE。工具失败结果仍写入 result，
+其 code/message 可供后续行为树读取；data.status 表示导航物理任务状态。
+服务报错、参数构建或响应解析异常返回 FAILURE。每次新请求清空上次输出；
+结束、超时和 halt 会清理本地挂起请求及响应正文。
+halt 或超时结束本地等待，已提交工具仍由 Agent 处理。
+
+与 Nav2 其他服务节点一样，宿主黑板提供 node、bt_loop_duration、server_timeout 和
+wait_for_service_timeout，时间配置使用 std::chrono::milliseconds。
+
+### 派生工具节点
+
+派生类可通过 buildArguments() 从普通类型端口构建参数，通过 onResult() 处理结果。
+例如，让上游只提供地图名称和数值范围：
+
+```cpp
+class GetSurroundingsNode : public CallToolNodeBase
+{
+public:
+  using CallToolNodeBase::CallToolNodeBase;
+
+  static BT::PortsList providedPorts()
+  {
+    auto ports = CallToolNodeBase::providedPorts();
+    ports.at("tool") = BT::InputPort<std::string>(
+      "tool", "get_surroundings", "工具名").second;
+    ports.insert(BT::InputPort<std::string>("costmap", "local", "地图来源"));
+    ports.insert(BT::InputPort<double>("range_m", 10.0, "观察范围"));
+    return ports;
+  }
+
+protected:
+  Json buildArguments() override
+  {
+    return {{"costmap", getInput<std::string>("costmap").value()},
+      {"range_m", getInput<double>("range_m").value()}};
+  }
+};
+```
+
+自定义结果状态时重写 `BT::NodeStatus onResult(const ToolResult & result)`；
+调用该方法前，原始结果已写入输出端口。派生插件链接
+`vln_behavior_tree::vln_call_tool_bt_node`，包含 `vln_behavior_tree/call_tool_node_base.hpp`。
+
 ## 编译与检查
 
 使用具有统一业务封装接口的当前 `vln_agent` 版本，在工作空间根目录执行：
@@ -144,6 +213,6 @@ colcon test --packages-select vln_behavior_tree --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-测试使用独立 ROS domain 的本地订阅者，覆盖动态插件加载、统一业务格式、
-采样时间、位姿、自定义图片元数据、派生节点扩展及 Agent 输入检查。
+测试使用独立 ROS domain 的本地订阅者和工具服务，覆盖动态插件加载、统一业务格式、
+采样时间、位姿、自定义图片元数据、派生节点扩展、工具响应、超时/停止和实际 Agent 服务对接。
 规划见 `docs/BEHAVIOR_TREE_PLAN.md`。

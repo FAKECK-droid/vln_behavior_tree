@@ -123,3 +123,20 @@ src/event_node_base.cpp
 
 2026-10-31：实现通用 EventNodeBase 与 ImageContent，集中构建业务数据和编码图片。
 2026-11-07：适配统一业务字段，message 写入 data，图片描述使用 time_stamp/pose/metadata。
+
+## 7. 工具调用基类
+
+CallToolNodeBase 继承 Nav2 的 BtServiceNode<vln_agent::srv::ToolCall>，
+复用 Agent 已实现的 /vln/tool_call 服务。其通用插件名称为 CallTool。
+
+- 输入 tool 和 arguments；派生类可增加普通类型端口并通过 buildArguments() 构建参数。
+- 每次开始执行生成独立调用 ID，向服务提交一个标准 completed/function_call 请求。
+- 等待期间返回 RUNNING，使用 Nav2 服务超时配置，默认等待工具完整结果 5000 毫秒。
+- 将返回的业务 payload 和原生图片还原为 vln_agent::ToolResult，通过 result 端口交付。
+- 默认按 payload.ok 返回状态；派生类可通过 onResult() 组织自己的结果处理。
+- 结束、异常和 halt 清理本地挂起请求，已提交工具继续由 Agent 处理。
+
+公共头文件为 include/vln_behavior_tree/call_tool_node_base.hpp，
+实现文件为 src/call_tool_node_base.cpp，导出库为 vln_call_tool_bt_node。
+验证覆盖请求格式、独立调用 ID、类型化参数、业务和图片原样保留、工具及服务错误、
+超时后重试、halt、派生结果处理，以及真实 ToolManager 服务的协议对接。
