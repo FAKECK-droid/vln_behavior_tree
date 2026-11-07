@@ -5,12 +5,19 @@
 
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <vln_agent/utils/base64.hpp>
-#include <vln_agent/utils/time.hpp>
+#include <vln_agent/utils/json.hpp>
 
 namespace vln_behavior_tree
 {
 namespace
 {
+/** @brief 使用共用格式序列化事件或图片采样时的小车位姿。 */
+Json poseJson(const Pose2D & pose)
+{
+  return vln_agent::utils::posePayload(
+    pose.frame_id, pose.x, pose.y, pose.yaw, pose.time_stamp);
+}
+
 template<typename T>
 T readInput(const BT::TreeNode & node, const std::string & port)
 {
@@ -40,21 +47,30 @@ BT::PortsList EventNodeBase::providedPorts()
 {
   return {
     BT::InputPort<std::string>("topic", "/vln/robot_event", "机器事件接收话题"),
-    BT::InputPort<std::string>("event", "status", "Json字段：事件类型"),
-    BT::InputPort<std::string>("text", "", "Json字段：事件说明文字"),
-    BT::InputPort<ImageContent>("image_content", "图片字节数组及自定义元数据")};
+    BT::InputPort<std::string>("event", "status", "事件类型，与 data 同级"),
+    BT::InputPort<std::string>("message", "", "事件说明，写入 data.message"),
+    BT::InputPort<std::string>("time_stamp", "可选的事件发生时间，UTC 三位毫秒字符串"),
+    BT::InputPort<Pose2D>("pose", "可选的小车位姿"),
+    BT::InputPort<ImageContent>("image_content", "图片字节、采样信息及自定义元数据")};
 }
 
 EventPayload EventNodeBase::buildPayload()
 {
   EventPayload result;
   auto & payload = result.business;
-  payload = {{"source", "robot"}, {"time_stamp", vln_agent::utils::utcNow()}, {"origin", name()},
-    {"event", readInput<std::string>(*this, "event")}};
+  payload = vln_agent::utils::businessPayload("robot");
+  payload["origin"] = name();
+  payload["event"] = readInput<std::string>(*this, "event");
   // BT 3.8 会省略空字符串默认端口的映射。
-  const auto text = config().input_ports.count("text") ?
-    readInput<std::string>(*this, "text") : std::string();
-  if (!text.empty()) {payload["text"] = text;}
+  const auto message = config().input_ports.count("message") ?
+    readInput<std::string>(*this, "message") : std::string();
+  if (!message.empty()) {payload["data"]["message"] = message;}
+  if (config().input_ports.count("time_stamp")) {
+    payload["time_stamp"] = readInput<std::string>(*this, "time_stamp");
+  }
+  if (config().input_ports.count("pose")) {
+    payload["pose"] = poseJson(readInput<Pose2D>(*this, "pose"));
+  }
 
   if (config().input_ports.count("image_content")) {
     const auto input = readInput<ImageContent>(*this, "image_content");
@@ -67,7 +83,10 @@ EventPayload EventNodeBase::buildPayload()
       for (const auto & field : image.metadata) {
         std::visit([&](const auto & value) {metadata[field.first] = value;}, field.second);
       }
-      payload["images"].push_back(std::move(metadata));
+      Json description{{"metadata", std::move(metadata)}};
+      if (!image.time_stamp.empty()) {description["time_stamp"] = image.time_stamp;}
+      if (image.pose) {description["pose"] = poseJson(*image.pose);}
+      payload["images"].push_back(std::move(description));
       result.image_content.push_back(
         {{"type", "input_image"},
           {"image_url", "data:" + image.mime_type + ";base64," +
@@ -88,6 +107,7 @@ BT::NodeStatus EventNodeBase::tick()
   }
   try {
     auto event = buildPayload();
+    vln_agent::utils::validateImageMetadata(event.business, event.image_content.size());
     const Json text{{"type", "input_text"}, {"text", event.business.dump()}};
     event.image_content.insert(event.image_content.begin(), text);
     const Json message{{"role", "user"}, {"content", std::move(event.image_content)}};

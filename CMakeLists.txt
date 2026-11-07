@@ -39,7 +39,7 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_event_node test/test_event_node.cpp TIMEOUT 30)
-  target_link_libraries(test_event_node vln_submit_event_bt_node)
+  target_link_libraries(test_event_node vln_submit_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_event_node PRIVATE
     VLN_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_submit_event_bt_node>")
   set_tests_properties(test_event_node PROPERTIES ENVIRONMENT

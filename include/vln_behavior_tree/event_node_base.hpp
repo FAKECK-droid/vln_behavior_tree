@@ -31,7 +31,7 @@ public:
   static BT::PortsList providedPorts();
 
 protected:
-  /** @brief 读取输入并构建业务数据、图片元数据和 Base64 图片内容。 */
+  /** @brief 构建统一业务字段、data 载荷、图片元数据和 Base64 图片内容。 */
   virtual EventPayload buildPayload();
 
 private:
