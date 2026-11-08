@@ -246,6 +246,68 @@ append/prepend 可从尚未初始化的黑板变量开始；replace 使用已有
 
 专用工具节点可重写基类 toolName() 返回固定工具名，并通过 buildArguments() 构建参数。
 
+## 原生 GetImage 取图节点
+
+`GetLatestColorImageService` 直接继承 Nav2 的 `BtServiceNode<rgbd_image_queue::srv::GetImage>`。
+加载 `vln_get_latest_color_image_service_bt_node`，服务默认 `/rgbd_image_queue/get_image`。
+operation 和双向 image_content 与工具版相同，支持 append、prepend、replace N 和 clear。
+两种节点共用图片集合操作；clear 清空黑板中的集合，其余操作发送 LATEST_COLOR、detail=0。
+原生压缩图字节直接写入 ImageContent，同时保留采样时间和服务返回的图像元数据。
+服务等待默认 5000 毫秒，沿用 Nav2 黑板的服务等待配置。
+
+```xml
+<GetLatestColorImageService operation="append"
+                            image_content="{pictures}"/>
+```
+
+## 八图环视事件
+
+加载 `vln_submit_surrounding_images_bt_node`，使用 `SubmitSurroundingImages`。
+节点读取 8 张 JPEG/PNG 图片，等比例缩小至网格内，留边居中，组成 3×3 图片。
+第 1 张位于正上方，后续按 direction 排列，中央显示当前 map yaw 数值及方向箭头。
+较小的源图片保留原尺寸。格子上的 1～8 为输入图片序号。
+
+| 新增输入 | 默认值 | 含义 |
+| --- | --- | --- |
+| yaw | 由调用方提供 | map 坐标系当前偏航角，单位弧度，逆时针为正 |
+| direction | counterclockwise | clockwise 顺时针，counterclockwise 逆时针 |
+| tile_size | 256 | 每格边长，单位像素；输出边长为其三倍 |
+
+沿用 EventNodeBase 的 image_content、event、message、pose、time_stamp 和 topic 端口。
+image_content 作为输入保留原来的 8 张图；中央 yaw 在图片上以角度显示。
+默认输出 768×768 JPEG，质量 85；事件 content 中包含业务文本和一张合成图。
+images[0] 直接记录 layout、direction、view_count、width、height 等元数据。
+data.yaw 保存弧度值，data.views 按原图顺序保存各图的自定义元数据、采样信息及
+source_index（从 0 开始）、row、column，便于关联原始观测。
+
+顺时针布局：
+
+```text
+8  1  2
+7 yaw 3
+6  5  4
+```
+
+逆时针布局：
+
+```text
+2  1  8
+3 yaw 7
+4  5  6
+```
+
+```xml
+<SubmitSurroundingImages name="ReportSurroundings"
+                         event="surroundings"
+                         image_content="{pictures}"
+                         yaw="{current_yaw}"
+                         direction="counterclockwise"
+                         tile_size="256"/>
+```
+
+合成图由派生类 buildPayload() 准备，再调用基类 buildPayload(images) 构建公共业务字段、
+完成一次 Base64 编码并发布。输入图片数量、解码或参数出错时返回 FAILURE。
+
 ## 编译与检查
 
 使用具有统一业务封装接口的当前 `vln_agent` 版本，在工作空间根目录执行：

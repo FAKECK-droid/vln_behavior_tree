@@ -162,3 +162,22 @@ EventNodeBase 再按最新格式构建事件，图片 metadata map 的键值直�
 
 插件文件为 plugins/tools/get_latest_color_image.cpp，
 库名为 vln_get_latest_color_image_bt_node，注册名称为 GetLatestColorImage。
+
+
+## 9. 原生取图与环视事件
+
+GetLatestColorImageService 直接使用 Nav2 BtServiceNode<GetImage> 调用原生取图服务，
+沿用 operation 和双向 image_content，固定请求 LATEST_COLOR、detail=0。
+与工具版共用 ImageOperation 和图片端口读写函数，保持集合操作一致。
+服务结果保留压缩图文件字节、原有元数据和真实采样时间，供 Event 节点统一编码。
+
+SubmitSurroundingImages 继承 EventNodeBase，读取八张图、yaw、direction 和 tile_size。
+第一张放正上方，按指定方向排列到 3×3 外圈，中央显示 yaw，合成为一张 JPEG。
+图片等比例缩小，居中留边；输出边长为 tile_size 的三倍，默认 768 像素。
+原始集合保留，事件 data.views 保存每张图的原始信息和网格位置。
+派生类通过 buildPayload(images) 复用基类的公共字段和图片编码，只发布合成图。
+
+导出插件：
+
+- vln_get_latest_color_image_service_bt_node / GetLatestColorImageService
+- vln_submit_surrounding_images_bt_node / SubmitSurroundingImages

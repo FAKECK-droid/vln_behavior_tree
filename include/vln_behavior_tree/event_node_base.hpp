@@ -42,6 +42,8 @@ public:
 protected:
   /** @brief 构建统一业务字段、data 载荷、图片元数据和 Base64 图片内容。 */
   virtual EventPayload buildPayload();
+  /** @brief 使用派生类准备好的图片集合，统一构建事件及图片编码。 */
+  EventPayload buildPayload(const ImageContent & images);
 
 private:
   BT::NodeStatus tick() override;

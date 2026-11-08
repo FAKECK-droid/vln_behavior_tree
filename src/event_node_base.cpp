@@ -97,6 +97,13 @@ BT::PortsList EventNodeBase::providedPorts()
 
 EventPayload EventNodeBase::buildPayload()
 {
+  const auto images = config().input_ports.count("image_content") ?
+    readInput<ImageContent>(*this, "image_content") : ImageContent{};
+  return buildPayload(images);
+}
+
+EventPayload EventNodeBase::buildPayload(const ImageContent & images)
+{
   EventPayload result;
   auto & payload = result.business;
   payload = vln_agent::utils::businessPayload("robot");
@@ -114,25 +121,22 @@ EventPayload EventNodeBase::buildPayload()
     std::optional<Pose2D>(provided_pose.value()) : lookupRobotPose();
   if (pose) {payload["pose"] = poseJson(*pose);}
 
-  if (config().input_ports.count("image_content")) {
-    const auto input = readInput<ImageContent>(*this, "image_content");
-    if (!input.images.empty()) {payload["images"] = Json::array();}
-    for (const auto & image : input.images) {
-      if (image.bytes.empty()) {
-        throw BT::RuntimeError("图片字节数组为空");
-      }
-      Json description = Json::object();
-      for (const auto & field : image.metadata) {
-        std::visit([&](const auto & value) {description[field.first] = value;}, field.second);
-      }
-      if (!image.time_stamp.empty()) {description["time_stamp"] = image.time_stamp;}
-      if (image.pose) {description["pose"] = poseJson(*image.pose);}
-      payload["images"].push_back(std::move(description));
-      result.image_content.push_back(
-        {{"type", "input_image"},
-          {"image_url", "data:" + image.mime_type + ";base64," +
-            vln_agent::utils::encodeBase64(image.bytes)}, {"detail", "auto"}});
+  if (!images.images.empty()) {payload["images"] = Json::array();}
+  for (const auto & image : images.images) {
+    if (image.bytes.empty()) {
+      throw BT::RuntimeError("图片字节数组为空");
     }
+    Json description = Json::object();
+    for (const auto & field : image.metadata) {
+      std::visit([&](const auto & value) {description[field.first] = value;}, field.second);
+    }
+    if (!image.time_stamp.empty()) {description["time_stamp"] = image.time_stamp;}
+    if (image.pose) {description["pose"] = poseJson(*image.pose);}
+    payload["images"].push_back(std::move(description));
+    result.image_content.push_back(
+      {{"type", "input_image"},
+        {"image_url", "data:" + image.mime_type + ";base64," +
+          vln_agent::utils::encodeBase64(image.bytes)}, {"detail", "auto"}});
   }
   return result;
 }

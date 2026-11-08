@@ -1,8 +1,6 @@
 #include "vln_behavior_tree/plugins/tools/get_latest_color_image.hpp"
 
 #include <exception>
-#include <mutex>
-#include <sstream>
 #include <string_view>
 #include <utility>
 
@@ -73,50 +71,12 @@ BT::PortsList GetLatestColorImage::providedPorts()
 
 std::string GetLatestColorImage::toolName() {return "capture_image";}
 
-ImageContent GetLatestColorImage::readImages() const
-{
-  const auto port = config().input_ports.find("image_content");
-  if (port == config().input_ports.end() || !config().output_ports.count("image_content")) {
-    throw BT::RuntimeError("请将 image_content 绑定到黑板变量");
-  }
-  const auto key = getRemappedKey("image_content", port->second);
-  if (!key) {throw BT::RuntimeError("image_content 需要黑板变量");}
-  {
-    std::unique_lock<std::mutex> lock(config().blackboard->entryMutex());
-    const auto value = config().blackboard->getAny(std::string(key.value()));
-    if (!value || value->empty()) {return {};}
-  }
-  const auto content = getInput<ImageContent>("image_content");
-  if (!content) {throw BT::RuntimeError("image_content 输入无效: ", content.error());}
-  return content.value();
-}
-
-std::size_t GetLatestColorImage::replaceIndex(const ImageContent & content) const
-{
-  if (replace_index_ < -1 || content.images.empty() ||
-    (replace_index_ >= 0 && static_cast<std::uint64_t>(replace_index_) >= content.images.size()))
-  {
-    throw BT::RuntimeError("replace 索引超出 image_content 范围");
-  }
-  return replace_index_ == -1 ? content.images.size() - 1 :
-         static_cast<std::size_t>(replace_index_);
-}
-
 GetLatestColorImage::Json GetLatestColorImage::buildArguments()
 {
   const auto input = getInput<std::string>("operation");
   if (!input) {throw BT::RuntimeError("operation 输入无效: ", input.error());}
-  std::istringstream parser(input.value());
-  std::string extra;
-  if (!(parser >> operation_)) {throw BT::RuntimeError("operation 为空");}
-  if (operation_ == "replace") {
-    if (!(parser >> replace_index_)) {throw BT::RuntimeError("请使用 replace <int>");}
-  } else if (operation_ != "append" && operation_ != "prepend") {
-    throw BT::RuntimeError("operation 需要为 append、prepend、replace <int> 或 clear");
-  }
-  if (parser >> extra) {throw BT::RuntimeError("operation 含有多余参数");}
-  const auto content = readImages();
-  if (operation_ == "replace") {replaceIndex(content);}
+  operation_ = ImageOperation::parse(input.value());
+  operation_.validate(readImageContent(*this));
   return {{"mode", "latest"}, {"detail", 0}};
 }
 
@@ -127,16 +87,9 @@ BT::NodeStatus GetLatestColorImage::onResult(const ToolResult & result)
     return BT::NodeStatus::FAILURE;
   }
   auto image = imageFromResult(result);
-  auto content = readImages();
-  if (operation_ == "replace") {
-    content.images.at(replaceIndex(content)) = std::move(image);
-  } else if (operation_ == "prepend") {
-    content.images.insert(content.images.begin(), std::move(image));
-  } else {
-    content.images.push_back(std::move(image));
-  }
-  const auto output = setOutput("image_content", content);
-  if (!output) {throw BT::RuntimeError("image_content 输出失败: ", output.error());}
+  auto content = readImageContent(*this);
+  operation_.apply(content, std::move(image));
+  writeImageContent(*this, content);
   return BT::NodeStatus::SUCCESS;
 }
 
@@ -146,12 +99,8 @@ BT::NodeStatus GetLatestColorImage::tick()
     if (status() != BT::NodeStatus::RUNNING) {
       const auto input = getInput<std::string>("operation");
       if (!input) {throw BT::RuntimeError("operation 输入无效: ", input.error());}
-      std::istringstream parser(input.value());
-      std::string operation, extra;
-      parser >> operation;
-      if (operation == "clear" && !(parser >> extra)) {
-        const auto output = setOutput("image_content", ImageContent{});
-        if (!output) {throw BT::RuntimeError("image_content 输出失败: ", output.error());}
+      if (ImageOperation::parse(input.value()).type == ImageOperation::Type::Clear) {
+        writeImageContent(*this, ImageContent{});
         return BT::NodeStatus::SUCCESS;
       }
     }
