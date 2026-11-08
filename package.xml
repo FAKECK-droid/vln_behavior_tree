@@ -16,9 +16,11 @@
   <depend>behaviortree_cpp_v3</depend>
   <depend>nlohmann_json</depend>
   <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
   <depend>vln_agent</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>rgbd_image_queue</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

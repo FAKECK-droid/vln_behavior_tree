@@ -13,6 +13,7 @@ find_package(nav2_behavior_tree REQUIRED)
 find_package(behaviortree_cpp_v3 REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(vln_agent REQUIRED)
 
 add_library(vln_submit_event_bt_node SHARED src/event_node_base.cpp)
@@ -22,7 +23,7 @@ target_include_directories(vln_submit_event_bt_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(vln_submit_event_bt_node PUBLIC
-  behaviortree_cpp_v3 rclcpp std_msgs)
+  behaviortree_cpp_v3 rclcpp std_msgs tf2_ros)
 target_link_libraries(vln_submit_event_bt_node
   PUBLIC nlohmann_json::nlohmann_json
   PRIVATE vln_agent::vln_agent_utils)
@@ -39,7 +40,14 @@ target_link_libraries(vln_call_tool_bt_node
   PUBLIC nlohmann_json::nlohmann_json
   PRIVATE vln_agent::vln_agent_utils)
 
-install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node
+add_library(vln_get_latest_color_image_bt_node SHARED plugins/tools/get_latest_color_image.cpp)
+target_compile_features(vln_get_latest_color_image_bt_node PUBLIC cxx_std_17)
+target_compile_definitions(vln_get_latest_color_image_bt_node PRIVATE BT_PLUGIN_EXPORT)
+target_link_libraries(vln_get_latest_color_image_bt_node
+  PUBLIC vln_call_tool_bt_node
+  PRIVATE vln_agent::vln_agent_utils)
+
+install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node vln_get_latest_color_image_bt_node
   EXPORT export_vln_event_nodes
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -50,6 +58,7 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(rgbd_image_queue REQUIRED)
   ament_add_gtest(test_event_node test/test_event_node.cpp TIMEOUT 30)
   target_link_libraries(test_event_node vln_submit_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_event_node PRIVATE
@@ -66,6 +75,19 @@ if(BUILD_TESTING)
   set_tests_properties(test_call_tool_node PROPERTIES ENVIRONMENT
     "ROS_DOMAIN_ID=183;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
 
+  ament_add_gtest(test_get_latest_color_image test/test_get_latest_color_image.cpp TIMEOUT 40)
+  target_link_libraries(test_get_latest_color_image
+    vln_get_latest_color_image_bt_node vln_submit_event_bt_node
+    vln_agent::vln_agent_tools vln_agent::vln_agent_utils)
+  ament_target_dependencies(test_get_latest_color_image rgbd_image_queue)
+  target_compile_definitions(test_get_latest_color_image PRIVATE
+    VLN_IMAGE_PLUGIN_PATH="$<TARGET_FILE:vln_get_latest_color_image_bt_node>"
+    VLN_IMAGE_TEST_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test-fixtures"
+    VLN_IMAGE_AGENT_SHARE="${vln_agent_DIR}/.."
+    VLN_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_submit_event_bt_node>")
+  set_tests_properties(test_get_latest_color_image PROPERTIES ENVIRONMENT
+    "ROS_DOMAIN_ID=185;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
+
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
@@ -73,5 +95,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
-ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json rclcpp std_msgs vln_agent)
+ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json rclcpp std_msgs tf2_ros vln_agent)
 ament_package()

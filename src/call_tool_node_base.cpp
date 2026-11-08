@@ -51,6 +51,13 @@ BT::PortsList CallToolNodeBase::providedPorts()
   return ports;
 }
 
+std::string CallToolNodeBase::toolName()
+{
+  const auto tool = getInput<std::string>("tool");
+  if (!tool || tool.value().empty()) {throw BT::RuntimeError("请提供工具函数名 tool");}
+  return tool.value();
+}
+
 CallToolNodeBase::Json CallToolNodeBase::buildArguments()
 {
   const auto arguments = getInput<std::string>("arguments");
@@ -60,9 +67,8 @@ CallToolNodeBase::Json CallToolNodeBase::buildArguments()
 
 void CallToolNodeBase::on_tick()
 {
-  setOutput("result", ToolResult{});
-  const auto tool = getInput<std::string>("tool");
-  if (!tool || tool.value().empty()) {throw BT::RuntimeError("请提供工具函数名 tool");}
+  if (config().output_ports.count("result")) {setOutput("result", ToolResult{});}
+  const auto tool = toolName();
   auto arguments = buildArguments();
   if (!arguments.is_object()) {throw BT::RuntimeError("工具 arguments 需要为 JSON 对象");}
   call_id_ = nextCallId();
@@ -70,7 +76,7 @@ void CallToolNodeBase::on_tick()
     {"status", "completed"}, {"output", Json::array(
         {
           {{"type", "function_call"}, {"call_id", call_id_},
-            {"name", tool.value()}, {"arguments", arguments.dump()}}})}}.dump();
+            {"name", tool}, {"arguments", arguments.dump()}}})}}.dump();
 }
 
 BT::NodeStatus CallToolNodeBase::on_completion(Service::Response::SharedPtr response)
@@ -93,7 +99,7 @@ BT::NodeStatus CallToolNodeBase::on_completion(Service::Response::SharedPtr resp
     result.images.push_back(std::move(content.at(i)));
   }
   vln_agent::utils::validateImageMetadata(result.payload, result.images.size());
-  setOutput("result", result);
+  if (config().output_ports.count("result")) {setOutput("result", result);}
   return onResult(result);
 }
 

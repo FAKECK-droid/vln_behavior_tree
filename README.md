@@ -20,7 +20,7 @@ EventManager，业务 JSON、图片元数据和 Base64 编码统一在 `buildPay
 | `event` | `status` | 顶层事件类型 |
 | `message` | 空字符串 | 事件说明，写入 `data.message` |
 | `time_stamp` | 当前 UTC 时间 | 可选的事件发生时间，UTC 三位毫秒字符串 |
-| `pose` | 省略 | 黑板中的 `Pose2D`，表示对应的小车位姿 |
+| `pose` | 最新 TF | 黑板中的 `Pose2D`；为空时读取 `map → base_link` |
 | `image_content` | 省略 | 黑板中的 `ImageContent`，包含图片字节、采样信息和自定义元数据 |
 
 每次执行发布一条 `std_msgs/msg/String`。内容为 `role=user` 原生消息，
@@ -36,6 +36,7 @@ QoS 为 reliable、volatile、KeepLast(10)。发布调用完成返回 `SUCCESS`�
   "time_stamp": "2026-11-07T02:30:00.125Z",
   "origin": "ReportNavigationFailure",
   "event": "error",
+  "pose": {"frame_id": "map", "x": 1.2, "y": 2.3, "yaw": 0.5},
   "data": {"message": "导航执行失败。"}
 }
 ```
@@ -66,13 +67,17 @@ blackboard->set("robot_pose", vln_behavior_tree::Pose2D{
 
 基类在 `buildPayload()` 内通过共用的 `posePayload()` 构造顶层 `pose`；
 采样时间填写在 `pose.time_stamp`，传入的事件时间保持原值。
+省略 pose、黑板值尚未填入或 Pose2D.frame_id 为空时，读取 `map → base_link` 的最新 TF。
+优先复用 Nav2 黑板中的 `tf_buffer`；独立使用时基类创建 TF 监听器。
+TF 暂不可用时记录日志，事件仍正常上报，稍后执行会再次查询。
+TF 时间戳为非零真实 ROS 时间时写入 pose.time_stamp；仿真时省略该 UTC 字段。
 
 ## 图片输入
 
 `image_content.hpp` 提供 `ImageContent`，其 `images` 数组的每项包含：
 
 - `bytes`：JPEG、PNG 等图片文件字节，`std::vector<unsigned char>`。
-- `metadata`：自定义 `std::map<std::string, MetadataValue>`；值支持字符串、布尔、int64 和 double。
+- `metadata`：自定义 `std::map<std::string, MetadataValue>`；值支持字符串、布尔、int64、uint64 和 double。
 - `mime_type`：默认 `image/jpeg`，PNG 使用 `image/png`。
 - `time_stamp`：可选的图片采样时间，空字符串表示省略。
 - `pose`：可选的采图时小车位姿，类型为 `std::optional<Pose2D>`。
@@ -104,13 +109,16 @@ blackboard->set("pictures", pictures);
 ```json
 {
   "time_stamp": "2026-11-07T02:30:00.080Z",
-  "metadata": {"label": "door", "score": 0.97, "sequence": 7, "usable": true}
+  "label": "door",
+  "score": 0.97,
+  "sequence": 7,
+  "usable": true
 }
 ```
 
-可选的图片位姿放在描述的 `pose` 中。自定义 metadata 保留提供方的全部键值，
-与公共采样字段分开；空元数据对应 `{"metadata":{}}`。省略图片端口或传入空集合时
-发送纯文字事件。发布前复用 Agent 的图片数量检查，确保 `images` 与原生图片逐张对应。
+可选的图片位姿放在描述的 `pose` 中。metadata map 的键值直接写入该图片描述；
+同名的非空 Image.time_stamp 和 Image.pose 优先使用采样字段。空描述为 `{}`。
+省略图片端口或传入空集合时发送纯文字事件。发布前复用 Agent 的图片数量检查，确保 `images` 与原生图片逐张对应。
 
 ## 派生节点
 
@@ -200,6 +208,43 @@ protected:
 自定义结果状态时重写 `BT::NodeStatus onResult(const ToolResult & result)`；
 调用该方法前，原始结果已写入输出端口。派生插件链接
 `vln_behavior_tree::vln_call_tool_bt_node`，包含 `vln_behavior_tree/call_tool_node_base.hpp`。
+
+## 最新彩色图节点
+
+加载 `vln_get_latest_color_image_bt_node` 后，使用 `GetLatestColorImage`。
+节点通过 ToolManager 的 `/vln/tool_call` 服务调用 `capture_image`，固定参数为
+`mode=latest, detail=0`。图像结果转换为普通 C++ 的 ImageContent，供事件节点继续使用。
+
+| 业务端口 | 方向 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| operation | 输入 | append | 图片集合操作 |
+| image_content | 双向 | 首次为空集合 | 读取和写回同一个黑板变量 |
+
+沿用基类的 service_name 和 server_timeout 服务配置端口。
+
+| operation | 操作 |
+| --- | --- |
+| append | 将新图添加到数组末尾 |
+| prepend | 将新图添加到数组头部 |
+| replace 0 | 用新图替换第一张 |
+| replace -1 | 用新图替换最后一张 |
+| replace N | 替换从 0 开始的第 N 项 |
+| clear | 清空集合，直接返回 SUCCESS |
+
+append/prepend 可从尚未初始化的黑板变量开始；replace 使用已有数组中的索引。
+取图、解析或索引出错时返回 FAILURE，集合保留原值。clear 在本地写回空集合。
+图片字节通过共用 Base64 解码函数还原，采样时间和自定义元数据一起保留；
+提交事件时由 buildPayload() 编码并将元数据直接填入 images 对应元素。
+
+```xml
+<Sequence>
+  <GetLatestColorImage operation="append" image_content="{pictures}"/>
+  <SubmitEvent name="ReportObservation" image_content="{pictures}"/>
+  <GetLatestColorImage operation="clear" image_content="{pictures}"/>
+</Sequence>
+```
+
+专用工具节点可重写基类 toolName() 返回固定工具名，并通过 buildArguments() 构建参数。
 
 ## 编译与检查
 

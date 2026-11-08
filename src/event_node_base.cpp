@@ -1,11 +1,16 @@
 #include "vln_behavior_tree/event_node_base.hpp"
 
+#include <chrono>
+#include <cmath>
 #include <exception>
 #include <utility>
 
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <vln_agent/utils/base64.hpp>
 #include <vln_agent/utils/json.hpp>
+#include <vln_agent/utils/time.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 namespace vln_behavior_tree
 {
@@ -43,6 +48,42 @@ EventNodeBase::EventNodeBase(
   node_ = node;
 }
 
+EventNodeBase::~EventNodeBase() = default;
+
+std::optional<Pose2D> EventNodeBase::lookupRobotPose()
+{
+  const auto node = node_.lock();
+  if (!node) {return std::nullopt;}
+  try {
+    if (!tf_buffer_) {
+      config().blackboard->get("tf_buffer", tf_buffer_);
+      if (!tf_buffer_) {
+        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+        tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+      }
+    }
+    const auto transform = tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+    const auto & p = transform.transform.translation;
+    const auto & q = transform.transform.rotation;
+    Pose2D pose{"map", p.x, p.y,
+      std::atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z)), ""};
+    bool simulated = false;
+    node->get_parameter_or("use_sim_time", simulated, false);
+    const auto & stamp = transform.header.stamp;
+    if (!simulated && (stamp.sec != 0 || stamp.nanosec != 0)) {
+      pose.time_stamp = vln_agent::utils::formatUtcTime(
+        std::chrono::system_clock::time_point(
+          std::chrono::seconds(stamp.sec) + std::chrono::nanoseconds(stamp.nanosec)));
+    }
+    return pose;
+  } catch (const tf2::TransformException & error) {
+    RCLCPP_WARN(node->get_logger(), "事件位姿 TF map -> base_link 获取失败: %s", error.what());
+    return std::nullopt;
+  }
+}
+
 BT::PortsList EventNodeBase::providedPorts()
 {
   return {
@@ -50,7 +91,7 @@ BT::PortsList EventNodeBase::providedPorts()
     BT::InputPort<std::string>("event", "status", "事件类型，与 data 同级"),
     BT::InputPort<std::string>("message", "", "事件说明，写入 data.message"),
     BT::InputPort<std::string>("time_stamp", "可选的事件发生时间，UTC 三位毫秒字符串"),
-    BT::InputPort<Pose2D>("pose", "可选的小车位姿"),
+    BT::InputPort<Pose2D>("pose", "小车位姿；为空时读取 map 到 base_link 的最新 TF"),
     BT::InputPort<ImageContent>("image_content", "图片字节、采样信息及自定义元数据")};
 }
 
@@ -68,9 +109,10 @@ EventPayload EventNodeBase::buildPayload()
   if (config().input_ports.count("time_stamp")) {
     payload["time_stamp"] = readInput<std::string>(*this, "time_stamp");
   }
-  if (config().input_ports.count("pose")) {
-    payload["pose"] = poseJson(readInput<Pose2D>(*this, "pose"));
-  }
+  const auto provided_pose = getInput<Pose2D>("pose");
+  const auto pose = provided_pose && !provided_pose.value().frame_id.empty() ?
+    std::optional<Pose2D>(provided_pose.value()) : lookupRobotPose();
+  if (pose) {payload["pose"] = poseJson(*pose);}
 
   if (config().input_ports.count("image_content")) {
     const auto input = readInput<ImageContent>(*this, "image_content");
@@ -79,11 +121,10 @@ EventPayload EventNodeBase::buildPayload()
       if (image.bytes.empty()) {
         throw BT::RuntimeError("图片字节数组为空");
       }
-      Json metadata = Json::object();
+      Json description = Json::object();
       for (const auto & field : image.metadata) {
-        std::visit([&](const auto & value) {metadata[field.first] = value;}, field.second);
+        std::visit([&](const auto & value) {description[field.first] = value;}, field.second);
       }
-      Json description{{"metadata", std::move(metadata)}};
       if (!image.time_stamp.empty()) {description["time_stamp"] = image.time_stamp;}
       if (image.pose) {description["pose"] = poseJson(*image.pose);}
       payload["images"].push_back(std::move(description));

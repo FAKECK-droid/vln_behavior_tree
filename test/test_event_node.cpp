@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <regex>
 #include <string>
@@ -7,6 +8,8 @@
 
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <gtest/gtest.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <vln_agent/utils/json.hpp>
 
 #include "vln_behavior_tree/event_node_base.hpp"
@@ -80,6 +83,7 @@ protected:
       "event_node_test", rclcpp::NodeOptions().use_intra_process_comms(true));
     blackboard = BT::Blackboard::create();
     blackboard->set("node", node);
+    blackboard->set("tf_buffer", std::make_shared<tf2_ros::Buffer>(node->get_clock()));
     factory.registerFromPlugin(VLN_EVENT_PLUGIN_PATH);
     executor.add_node(node);
   }
@@ -237,17 +241,17 @@ TEST_F(EventNodeTest, EncodesImageBytesAndAllCustomMetadataWithoutChangingInput)
   const auto metadata = payload().at("images");
   ASSERT_EQ(metadata.size(), 2);
   EXPECT_EQ(
-    metadata.at(0).at("metadata"), (Json{{"label", "door"}, {"sequence", 7}, {"score", 0.97},
-      {"usable", true}, {"image_url", "custom metadata"},
-      {"time_stamp", "custom timestamp label"}, {"pose", "custom pose label"}}));
+    metadata.at(0).at("label"), "door");
+  EXPECT_FALSE(metadata.at(0).contains("metadata"));
+  EXPECT_EQ(metadata.at(0).at("image_url"), "custom metadata");
   EXPECT_EQ(metadata.at(0).at("time_stamp"), "2026-11-07T02:30:00.080Z");
   EXPECT_EQ(
     metadata.at(0).at("pose"), (Json{{"frame_id", "map"}, {"x", 1.0}, {"y", 2.0},
       {"yaw", 0.5}, {"time_stamp", "2026-11-07T02:30:00.070Z"}}));
-  EXPECT_TRUE(metadata.at(0).at("metadata").at("sequence").is_number_integer());
-  EXPECT_TRUE(metadata.at(0).at("metadata").at("score").is_number_float());
-  EXPECT_TRUE(metadata.at(0).at("metadata").at("usable").is_boolean());
-  EXPECT_EQ(metadata.at(1), (Json{{"metadata", Json::object()}}));
+  EXPECT_TRUE(metadata.at(0).at("sequence").is_number_integer());
+  EXPECT_TRUE(metadata.at(0).at("score").is_number_float());
+  EXPECT_TRUE(metadata.at(0).at("usable").is_boolean());
+  EXPECT_EQ(metadata.at(1), Json::object());
   const auto original = blackboard->get<ImageContent>("pictures");
   ASSERT_EQ(original.images.size(), pictures.images.size());
   EXPECT_EQ(original.images.at(0).bytes, pictures.images.at(0).bytes);
@@ -270,7 +274,7 @@ TEST_F(EventNodeTest, ReadsImageInputOnlyWhileBuildingPayload)
   EXPECT_TRUE(blackboard->get<ImageContent>("pictures").images.empty());
   EXPECT_EQ(received[0].at("content").size(), 2);
   EXPECT_EQ(received[0].at("content").at(1).at("image_url"), "data:image/png;base64,AQ==");
-  EXPECT_EQ(payload().at("images").at(0).at("metadata"), (Json{{"sample", 42}}));
+  EXPECT_EQ(payload().at("images").at(0), (Json{{"sample", 42}}));
 }
 
 TEST_F(EventNodeTest, ResolvesUpdatedTopicAndImageInput)
@@ -318,7 +322,7 @@ TEST_F(EventNodeTest, InvalidInputFailsAndCanBeCorrectedOnNextExecution)
   auto missing_input = tree("<SubmitEvent message='{missing_description}'/>");
   EXPECT_EQ(missing_input.tickRoot(), BT::NodeStatus::FAILURE);
   auto missing_pose = tree("<SubmitEvent pose='{missing_pose}'/>");
-  EXPECT_EQ(missing_pose.tickRoot(), BT::NodeStatus::FAILURE);
+  EXPECT_EQ(missing_pose.tickRoot(), BT::NodeStatus::SUCCESS);
   auto missing_time = tree("<SubmitEvent time_stamp='{missing_event_time}'/>");
   EXPECT_EQ(missing_time.tickRoot(), BT::NodeStatus::FAILURE);
 }
@@ -340,6 +344,91 @@ TEST_F(EventNodeTest, RejectsDerivedImageMismatchAndCanPublishTheNextValidEvent)
   ASSERT_TRUE(awaitMessages(1));
   EXPECT_EQ(payload().at("images").size(), 1);
   EXPECT_EQ(received.at(0).at("content").size(), 2);
+}
+
+
+TEST_F(EventNodeTest, MissingOrEmptyPoseUsesLatestMapToBaseLinkTransform)
+{
+  subscribe();
+  auto buffer = blackboard->get<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer");
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.frame_id = "map";
+  transform.child_frame_id = "base_link";
+  transform.header.stamp.sec = 1794018600;
+  transform.header.stamp.nanosec = 80000000;
+  transform.transform.translation.x = 4.2;
+  transform.transform.translation.y = -1.5;
+  transform.transform.rotation.z = std::sin(0.7 / 2);
+  transform.transform.rotation.w = std::cos(0.7 / 2);
+  ASSERT_TRUE(buffer->setTransform(transform, "test", false));
+  auto bt = tree("<SubmitEvent/>");
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitMessages(1));
+  EXPECT_EQ(payload().at("pose").at("frame_id"), "map");
+  EXPECT_DOUBLE_EQ(payload().at("pose").at("x").get<double>(), 4.2);
+  EXPECT_DOUBLE_EQ(payload().at("pose").at("y").get<double>(), -1.5);
+  EXPECT_NEAR(payload().at("pose").at("yaw").get<double>(), 0.7, 1e-12);
+  EXPECT_TRUE(payload().at("pose").contains("time_stamp"));
+
+  blackboard->set("empty_pose", Pose2D{});
+  auto empty = tree("<SubmitEvent pose='{empty_pose}'/>");
+  ASSERT_EQ(empty.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitMessages(2));
+  EXPECT_EQ(payload(1).at("pose"), payload().at("pose"));
+
+  transform.transform.translation.x = 8.4;
+  ASSERT_TRUE(buffer->setTransform(transform, "test", false));
+  auto missing = tree("<SubmitEvent pose='{missing_pose}'/>");
+  ASSERT_EQ(missing.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitMessages(3));
+  EXPECT_DOUBLE_EQ(payload(2).at("pose").at("x").get<double>(), 8.4);
+}
+
+TEST_F(EventNodeTest, StandaloneNodeReceivesTfWithoutNav2Buffer)
+{
+  subscribe();
+  // 空指针触发基类创建自身的监听器。
+  blackboard->set("tf_buffer", std::shared_ptr<tf2_ros::Buffer>{});
+  tf2_ros::StaticTransformBroadcaster broadcaster(node);
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.frame_id = "map";
+  transform.child_frame_id = "base_link";
+  transform.transform.translation.x = 6.0;
+  transform.transform.rotation.w = 1.0;
+  broadcaster.sendTransform(transform);
+  auto bt = tree("<SubmitEvent/>");
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  bool found = false;
+  while (!found && std::chrono::steady_clock::now() < deadline) {
+    ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+    executor.spin_some();
+    for (std::size_t i = 0; i < received.size(); ++i) {
+      if (payload(i).contains("pose")) {
+        EXPECT_DOUBLE_EQ(payload(i).at("pose").at("x").get<double>(), 6.0);
+        EXPECT_FALSE(payload(i).at("pose").contains("time_stamp"));
+        found = true;
+      }
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(EventNodeTest, SimulatedTfStampIsNotReportedAsUtc)
+{
+  subscribe();
+  node->set_parameter(rclcpp::Parameter("use_sim_time", true));
+  auto buffer = blackboard->get<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer");
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.frame_id = "map";
+  transform.child_frame_id = "base_link";
+  transform.header.stamp.sec = 100;
+  transform.transform.rotation.w = 1.0;
+  ASSERT_TRUE(buffer->setTransform(transform, "test", false));
+  auto bt = tree("<SubmitEvent/>");
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitMessages(1));
+  EXPECT_FALSE(payload().at("pose").contains("time_stamp"));
 }
 
 TEST_F(EventNodeTest, NodeDoesNotRetainHostAfterBlackboardReleasesIt)

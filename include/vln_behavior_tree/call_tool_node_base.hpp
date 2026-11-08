@@ -34,6 +34,8 @@ public:
   void halt() override;
 
 protected:
+  /** @brief 提供工具名；默认读取 tool，专用节点可返回固定名称。 */
+  virtual std::string toolName();
   /** @brief 构建本次工具参数；默认解析 arguments，派生类可读取自己的类型化端口。 */
   virtual Json buildArguments();
   /**
