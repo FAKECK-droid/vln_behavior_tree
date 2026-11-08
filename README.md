@@ -308,6 +308,57 @@ source_index（从 0 开始）、row、column，便于关联原始观测。
 合成图由派生类 buildPayload() 准备，再调用基类 buildPayload(images) 构建公共业务字段、
 完成一次 Base64 编码并发布。输入图片数量、解码或参数出错时返回 FAILURE。
 
+## 数值表达式更新导航目标
+
+加载 `vln_update_goal_bt_node`，使用同步节点 `UpdateGoal` 更新导航树中的目标：
+
+```xml
+<UpdateGoal goal="{goal}"
+            x="x + 1.0"
+            y="3.0"
+            yaw="yaw + pi / 2"/>
+```
+
+| 端口 | 方向 / 类型 | 含义 |
+| --- | --- | --- |
+| goal | 双向 PoseStamped | 读取并写回导航目标 |
+| x、y、z | 可选输入，字符串 | 位置计算表达式，空值保留原坐标 |
+| yaw | 可选输入，字符串 | 偏航角表达式，空值保留原姿态 |
+| variables | 可选输入，GoalVariables | std::map<std::string, double> 自定义数值变量 |
+
+表达式中的 x/y/z/yaw 来自本次执行前的目标，所有字段基于同一份快照计算。
+x/y/z 沿目标 frame_id 所在坐标系取值，单位米；yaw 单位弧度，逆时针为正。
+内置变量 x/y/z/yaw/pi 由节点提供，variables 为表达式提供其他自定义数值。
+支持四则运算、括号以及 sin、cos、atan2、sqrt、abs、min、max 等函数。
+`^` 表示乘方，按右结合计算，例如 `2^3^2=512`，`-2^2=-4`。
+
+```cpp
+#include <vln_behavior_tree/plugins/actions/update_goal.hpp>
+
+blackboard->set("goal_variables", vln_behavior_tree::GoalVariables{
+  {"step", 0.5}});
+```
+
+```xml
+<UpdateGoal goal="{goal}"
+            variables="{goal_variables}"
+            x="x + step * cos(yaw)"
+            y="y + step * sin(yaw)"/>
+```
+
+上述例子将目标沿目标自身朝向前移 step 米。全部表达式计算成功后统一写回目标，
+更新 yaw 时保留原 roll/pitch 并生成归一化四元数，frame_id 保持原值。
+有数值变化时使用宿主 ROS 时钟更新时间戳；空表达式或结果相同时保留整个原始目标。
+输入或表达式出错、结果非有限时返回 FAILURE 并记录日志，原目标保持原值。
+宿主黑板提供 node，与其他 Nav2 节点一致。
+
+每次 tick 执行一次运算，`x="x + 1"` 连续执行三次会累计增加 3 米。
+可以把该节点放在行为树中需要调整目标的分支，后续 ComputePathToPose 使用更新后的 goal。
+
+表达式解析器随包附带，使用 [TinyExpr](https://github.com/codeplea/tinyexpr)，
+版本和 zlib 许可证见 `third_party/tinyexpr/UPSTREAM.md`、`LICENSE`。
+解析器作为私有静态依赖编入节点库，构建时使用包内源码。
+
 ## 编译与检查
 
 使用具有统一业务封装接口的当前 `vln_agent` 版本，在工作空间根目录执行：

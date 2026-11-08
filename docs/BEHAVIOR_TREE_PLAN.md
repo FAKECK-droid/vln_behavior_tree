@@ -181,3 +181,20 @@ SubmitSurroundingImages 继承 EventNodeBase，读取八张图、yaw、direction
 
 - vln_get_latest_color_image_service_bt_node / GetLatestColorImageService
 - vln_submit_surrounding_images_bt_node / SubmitSurroundingImages
+
+
+## 10. 目标数值更新节点
+
+UpdateGoal 继承 BT::SyncActionNode，goal 为双向 geometry_msgs::msg::PoseStamped。
+x、y、z、yaw 为可选数值表达式，variables 为 std::map<std::string, double>。
+每次执行读取一份原始目标，所有表达式使用该快照中的 x/y/z/yaw 和常量 pi，
+并绑定调用方提供的自定义变量。解析与计算完成后统一写回。
+
+位置按目标所在坐标系计算，yaw 使用弧度；更新 yaw 时保留 roll/pitch，生成归一化四元数。
+frame_id 保持原值，目标有数值变化时用 ROS 时钟更新时间戳。
+空表达式或无数值变化时保留原目标。失败返回 FAILURE，原目标保持原值。
+相对运算在每次 tick 时累计执行，行为树决定目标调整时机。
+
+TinyExpr 解析器以固定版本随包提供，支持基础数学运算和函数，并补充 min/max。
+插件库为 vln_update_goal_bt_node，注册名为 UpdateGoal。
+验证覆盖快照语义、自定义变量、数学函数、原子写回、姿态、时间戳与下游目标读取。

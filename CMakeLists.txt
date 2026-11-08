@@ -7,6 +7,8 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(nav2_bt_navigator REQUIRED)
 find_package(nav2_core REQUIRED)
 find_package(nav2_behavior_tree REQUIRED)
@@ -73,8 +75,29 @@ target_link_libraries(vln_submit_surrounding_images_bt_node
   PUBLIC vln_submit_event_bt_node
   PRIVATE vln_agent::vln_agent_utils ${OpenCV_LIBRARIES})
 
+add_library(vln_goal_expression STATIC third_party/tinyexpr/tinyexpr.c)
+set_target_properties(vln_goal_expression PROPERTIES
+  POSITION_INDEPENDENT_CODE ON C_STANDARD 99 C_STANDARD_REQUIRED YES C_VISIBILITY_PRESET hidden)
+target_compile_definitions(vln_goal_expression PRIVATE TE_POW_FROM_RIGHT)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  # 保留上游 C 实现的函数指针转换，单独处理第三方源码的 pedantic 提示。
+  target_compile_options(vln_goal_expression PRIVATE -Wno-pedantic)
+endif()
+
+add_library(vln_update_goal_bt_node SHARED plugins/actions/update_goal.cpp)
+target_compile_features(vln_update_goal_bt_node PUBLIC cxx_std_17)
+target_compile_definitions(vln_update_goal_bt_node PRIVATE BT_PLUGIN_EXPORT)
+target_include_directories(vln_update_goal_bt_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_include_directories(vln_update_goal_bt_node SYSTEM PRIVATE third_party/tinyexpr)
+ament_target_dependencies(vln_update_goal_bt_node PUBLIC
+  behaviortree_cpp_v3 geometry_msgs rclcpp tf2)
+target_link_libraries(vln_update_goal_bt_node PRIVATE vln_goal_expression)
+
 install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node vln_get_latest_color_image_bt_node
   vln_image_content_utils vln_get_latest_color_image_service_bt_node vln_submit_surrounding_images_bt_node
+  vln_update_goal_bt_node
   EXPORT export_vln_event_nodes
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -82,6 +105,8 @@ install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node vln_get_latest_co
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY behavior_trees docs DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES third_party/tinyexpr/LICENSE third_party/tinyexpr/UPSTREAM.md
+  DESTINATION share/${PROJECT_NAME}/third_party/tinyexpr)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -135,12 +160,23 @@ if(BUILD_TESTING)
   set_tests_properties(test_get_latest_color_image_service PROPERTIES ENVIRONMENT
     "ROS_DOMAIN_ID=189;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
 
+  ament_add_gtest(test_update_goal test/test_update_goal.cpp TIMEOUT 30)
+  target_link_libraries(test_update_goal vln_update_goal_bt_node)
+  target_compile_definitions(test_update_goal PRIVATE
+    VLN_UPDATE_GOAL_PLUGIN_PATH="$<TARGET_FILE:vln_update_goal_bt_node>")
+  set_tests_properties(test_update_goal PROPERTIES ENVIRONMENT
+    "ROS_DOMAIN_ID=191;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
+
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
+  list(APPEND AMENT_LINT_AUTO_FILE_EXCLUDE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyexpr/tinyexpr.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyexpr/tinyexpr.h")
   ament_lint_auto_find_test_dependencies()
 endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
-ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json rclcpp std_msgs tf2_ros vln_agent rgbd_image_queue OpenCV)
+ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json
+  rclcpp geometry_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
 ament_package()
