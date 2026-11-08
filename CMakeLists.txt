@@ -8,6 +8,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(nav2_bt_navigator REQUIRED)
 find_package(nav2_core REQUIRED)
@@ -75,6 +76,14 @@ target_link_libraries(vln_submit_surrounding_images_bt_node
   PUBLIC vln_submit_event_bt_node
   PRIVATE vln_agent::vln_agent_utils ${OpenCV_LIBRARIES})
 
+add_library(vln_navigation_event_bt_node SHARED plugins/events/navigation_event.cpp)
+target_compile_features(vln_navigation_event_bt_node PUBLIC cxx_std_17)
+target_compile_definitions(vln_navigation_event_bt_node PRIVATE BT_PLUGIN_EXPORT)
+ament_target_dependencies(vln_navigation_event_bt_node PUBLIC geometry_msgs nav_msgs tf2)
+target_link_libraries(vln_navigation_event_bt_node
+  PUBLIC vln_submit_event_bt_node
+  PRIVATE vln_agent::vln_agent_utils)
+
 add_library(vln_goal_expression STATIC third_party/tinyexpr/tinyexpr.c)
 set_target_properties(vln_goal_expression PROPERTIES
   POSITION_INDEPENDENT_CODE ON C_STANDARD 99 C_STANDARD_REQUIRED YES C_VISIBILITY_PRESET hidden)
@@ -97,7 +106,7 @@ target_link_libraries(vln_update_goal_bt_node PRIVATE vln_goal_expression)
 
 install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node vln_get_latest_color_image_bt_node
   vln_image_content_utils vln_get_latest_color_image_service_bt_node vln_submit_surrounding_images_bt_node
-  vln_update_goal_bt_node
+  vln_update_goal_bt_node vln_navigation_event_bt_node
   EXPORT export_vln_event_nodes
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -167,6 +176,45 @@ if(BUILD_TESTING)
   set_tests_properties(test_update_goal PROPERTIES ENVIRONMENT
     "ROS_DOMAIN_ID=191;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
 
+  ament_add_gtest(test_navigation_event test/test_navigation_event.cpp TIMEOUT 30)
+  target_link_libraries(test_navigation_event vln_navigation_event_bt_node vln_agent::vln_agent_utils)
+  target_compile_definitions(test_navigation_event PRIVATE
+    VLN_NAVIGATION_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_navigation_event_bt_node>")
+  set_tests_properties(test_navigation_event PROPERTIES ENVIRONMENT
+    "ROS_DOMAIN_ID=197;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
+
+  get_filename_component(_nav2_bt_prefix "${nav2_behavior_tree_DIR}/../../.." ABSOLUTE)
+  find_library(VLN_TEST_RECOVERY_PLUGIN NAMES nav2_recovery_node_bt_node
+    HINTS "${_nav2_bt_prefix}/lib" REQUIRED)
+  find_library(VLN_TEST_PIPELINE_PLUGIN NAMES nav2_pipeline_sequence_bt_node
+    HINTS "${_nav2_bt_prefix}/lib" REQUIRED)
+  find_library(VLN_TEST_RATE_PLUGIN NAMES nav2_rate_controller_bt_node
+    HINTS "${_nav2_bt_prefix}/lib" REQUIRED)
+  find_library(VLN_TEST_ROUND_ROBIN_PLUGIN NAMES nav2_round_robin_node_bt_node
+    HINTS "${_nav2_bt_prefix}/lib" REQUIRED)
+  ament_add_gtest(test_lookaround test/test_lookaround.cpp TIMEOUT 40)
+  ament_target_dependencies(test_lookaround nav_msgs)
+  target_include_directories(test_lookaround PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(test_lookaround vln_submit_surrounding_images_bt_node
+    vln_update_goal_bt_node vln_get_latest_color_image_service_bt_node
+    vln_agent::vln_agent_utils ${OpenCV_LIBRARIES})
+  target_compile_definitions(test_lookaround PRIVATE
+    VLN_LOOK_NATIVE_PLUGIN="$<TARGET_FILE:vln_get_latest_color_image_service_bt_node>"
+    VLN_LOOK_UPDATE_PLUGIN="$<TARGET_FILE:vln_update_goal_bt_node>"
+    VLN_LOOK_MOSAIC_PLUGIN="$<TARGET_FILE:vln_submit_surrounding_images_bt_node>"
+    VLN_TEST_RECOVERY_PLUGIN="${VLN_TEST_RECOVERY_PLUGIN}"
+    VLN_TEST_PIPELINE_PLUGIN="${VLN_TEST_PIPELINE_PLUGIN}"
+    VLN_TEST_RATE_PLUGIN="${VLN_TEST_RATE_PLUGIN}"
+    VLN_TEST_ROUND_ROBIN_PLUGIN="${VLN_TEST_ROUND_ROBIN_PLUGIN}"
+    VLN_LOOKAROUND_XML="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/lookaround.xml"
+    VLN_MULTIGOAL_XML="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/vln_navthroughgoals.xml")
+  set(_lookaround_test_environment
+    "ROS_DOMAIN_ID=195"
+    "ROS_LOCALHOST_ONLY=1"
+    "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs"
+    "AMENT_PREFIX_PATH=${CMAKE_INSTALL_PREFIX}:$ENV{AMENT_PREFIX_PATH}")
+  set_tests_properties(test_lookaround PROPERTIES ENVIRONMENT "${_lookaround_test_environment}")
+
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
@@ -178,5 +226,5 @@ endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
 ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json
-  rclcpp geometry_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
+  rclcpp geometry_msgs nav_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
 ament_package()

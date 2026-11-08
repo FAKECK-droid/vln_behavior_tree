@@ -102,7 +102,20 @@ EventPayload EventNodeBase::buildPayload()
   return buildPayload(images);
 }
 
+std::optional<Pose2D> EventNodeBase::readPose()
+{
+  const auto provided = getInput<Pose2D>("pose");
+  return provided && !provided.value().frame_id.empty() ?
+         std::optional<Pose2D>(provided.value()) : lookupRobotPose();
+}
+
 EventPayload EventNodeBase::buildPayload(const ImageContent & images)
+{
+  return buildPayload(images, readPose());
+}
+
+EventPayload EventNodeBase::buildPayload(
+  const ImageContent & images, const std::optional<Pose2D> & pose)
 {
   EventPayload result;
   auto & payload = result.business;
@@ -116,9 +129,6 @@ EventPayload EventNodeBase::buildPayload(const ImageContent & images)
   if (config().input_ports.count("time_stamp")) {
     payload["time_stamp"] = readInput<std::string>(*this, "time_stamp");
   }
-  const auto provided_pose = getInput<Pose2D>("pose");
-  const auto pose = provided_pose && !provided_pose.value().frame_id.empty() ?
-    std::optional<Pose2D>(provided_pose.value()) : lookupRobotPose();
   if (pose) {payload["pose"] = poseJson(*pose);}
 
   if (!images.images.empty()) {payload["images"] = Json::array();}

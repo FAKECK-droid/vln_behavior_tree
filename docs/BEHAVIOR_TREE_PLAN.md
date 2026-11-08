@@ -110,8 +110,8 @@ tick() 整体封装已构建的数据，复用 Agent 的图片对应关系检查
 
 可将该节点放在成功、恢复、失败或其他上报分支。具体接入两棵 Nav2 导航树的位置另行确定：
 
-- behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
-- behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+- behavior_trees/vln_nav2goal.xml
+- behavior_trees/vln_navthroughgoals.xml
 
 ## 6. 文件与验证
 
@@ -171,11 +171,11 @@ GetLatestColorImageService 直接使用 Nav2 BtServiceNode<GetImage> 调用原�
 与工具版共用 ImageOperation 和图片端口读写函数，保持集合操作一致。
 服务结果保留压缩图文件字节、原有元数据和真实采样时间，供 Event 节点统一编码。
 
-SubmitSurroundingImages 继承 EventNodeBase，读取八张图、yaw、direction 和 tile_size。
+SubmitSurroundingImages 继承 EventNodeBase，读取八张图、direction 和 tile_size，yaw 从基类位姿获取。
 第一张放正上方，按指定方向排列到 3×3 外圈，中央显示 yaw，合成为一张 JPEG。
 图片等比例缩小，居中留边；输出边长为 tile_size 的三倍，默认 768 像素。
 原始集合保留，事件 data.views 保存每张图的原始信息和网格位置。
-派生类通过 buildPayload(images) 复用基类的公共字段和图片编码，只发布合成图。
+派生类通过 readPose() 与 buildPayload(images, pose) 复用同一份位姿及公共字段，只发布合成图。
 
 导出插件：
 
@@ -198,3 +198,20 @@ frame_id 保持原值，目标有数值变化时用 ROS 时钟更新时间戳。
 TinyExpr 解析器以固定版本随包提供，支持基础数学运算和函数，并补充 min/max。
 插件库为 vln_update_goal_bt_node，注册名为 UpdateGoal。
 验证覆盖快照语义、自定义变量、数学函数、原子写回、姿态、时间戳与下游目标读取。
+
+
+## 11. 导航事件与 lookaround
+
+NavigationEvent 复用事件基类，默认从现有导航黑板读取 goal、goals、path、number_recoveries。
+存在的数据写入 data，缺省项省略；event 与 message 沿用基类端口。
+目标与路径位姿按公共字段形式序列化，保留坐标系、x/y/z、yaw 和真实采样时间。
+
+两棵导航树采用独立入口 ID：VlnNav2Goal（单目标）与 VlnNavThroughGoals（多目标）。
+lookaround.xml include 单目标树，使用共享黑板复用调用方提供的当前位姿 goal。
+清空图片集合后循环八次：append 最新图像 → yaw 增加 pi/8 → 调用单目标子树。
+最后提交 SubmitSurroundingImages。中央 yaw 与事件 pose 从基类 readPose() 的同一快照获取。
+TF 暂不可用时仍提交图片，中央标记 unavailable。
+
+验证覆盖默认黑板输入、序列化、图片兼容、TF 位姿复用、文本 include 加载、
+八次循环顺序、坐标保持、等待过程、提前失败与 halt。导航叶节点使用本地替身，
+实际图片服务节点、目标更新节点、Nav2 控制节点和事件提交节点参与集成测试。

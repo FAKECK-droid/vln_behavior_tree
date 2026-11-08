@@ -36,7 +36,6 @@ void putCentered(cv::Mat & tile, const std::string & text, int y)
 BT::PortsList SubmitSurroundingImages::providedPorts()
 {
   auto ports = EventNodeBase::providedPorts();
-  ports.insert(BT::InputPort<double>("yaw", "当前 map 坐标系偏航角，单位弧度"));
   ports.insert(
     BT::InputPort<std::string>(
       "direction", "counterclockwise", "clockwise 或 counterclockwise，从正上方开始排列"));
@@ -47,10 +46,10 @@ EventPayload SubmitSurroundingImages::buildPayload()
 {
   const auto pictures = input<ImageContent>(*this, "image_content");
   if (pictures.images.size() != 8) {throw BT::RuntimeError("环视事件需要八张图片");}
-  const auto yaw = input<double>(*this, "yaw");
+  const auto pose = readPose();
   const auto direction = input<std::string>(*this, "direction");
   const auto tile_size = input<int>(*this, "tile_size");
-  if (!std::isfinite(yaw)) {throw BT::RuntimeError("yaw 需要为有限数值");}
+  if (pose && !std::isfinite(pose->yaw)) {throw BT::RuntimeError("当前位姿的 yaw 需要为有限数值");}
   if (direction != "clockwise" && direction != "counterclockwise") {
     throw BT::RuntimeError("direction 需要为 clockwise 或 counterclockwise");
   }
@@ -104,14 +103,20 @@ EventPayload SubmitSurroundingImages::buildPayload()
   auto center = mosaic(cv::Rect(tile_size, tile_size, tile_size, tile_size));
   center.setTo(cv::Scalar(32, 32, 32));
   constexpr double pi = 3.14159265358979323846;
-  putCentered(center, "yaw (map)", tile_size * 2 / 5);
-  putCentered(center, cv::format("%.1f deg", yaw * 180.0 / pi), tile_size * 3 / 5);
-  const cv::Point start(tile_size / 2, tile_size * 4 / 5);
-  const int length = tile_size / 8;
-  cv::arrowedLine(
-    center, start,
-    cv::Point(start.x + int(length * std::cos(yaw)), start.y - int(length * std::sin(yaw))),
-    cv::Scalar(80, 200, 255), 2, cv::LINE_AA, 0, 0.3);
+  putCentered(center, pose ? "yaw (" + pose->frame_id + ")" : "yaw", tile_size * 2 / 5);
+  if (pose) {
+    putCentered(center, cv::format("%.1f deg", pose->yaw * 180.0 / pi), tile_size * 3 / 5);
+    const cv::Point start(tile_size / 2, tile_size * 4 / 5);
+    const int length = tile_size / 8;
+    cv::arrowedLine(
+      center, start,
+      cv::Point(
+        start.x + int(length * std::cos(pose->yaw)),
+        start.y - int(length * std::sin(pose->yaw))),
+      cv::Scalar(80, 200, 255), 2, cv::LINE_AA, 0, 0.3);
+  } else {
+    putCentered(center, "unavailable", tile_size * 3 / 5);
+  }
   ImageContent output;
   ImageContent::Image composite;
   composite.mime_type = "image/jpeg";
@@ -123,8 +128,8 @@ EventPayload SubmitSurroundingImages::buildPayload()
     throw BT::RuntimeError("环视图片 JPEG 编码失败");
   }
   output.images.push_back(std::move(composite));
-  auto event = EventNodeBase::buildPayload(output);
-  event.business["data"]["yaw"] = yaw;
+  auto event = EventNodeBase::buildPayload(output, pose);
+  if (pose) {event.business["data"]["yaw"] = pose->yaw;}
   event.business["data"]["views"] = std::move(views);
   return event;
 }

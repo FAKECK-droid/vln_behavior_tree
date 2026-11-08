@@ -9,6 +9,7 @@
 #include <vector>
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <gtest/gtest.h>
+#include <tf2_ros/buffer.h>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <vln_agent/utils/base64.hpp>
@@ -108,7 +109,8 @@ protected:
 TEST_F(SurroundingImagesTest, PublishesSingleJpegWithClockwiseViewsAndCenterYaw)
 {
   blackboard->set("pictures", pictures());
-  auto bt = tree("image_content='{pictures}' yaw='1.5707963267948966' direction='clockwise'");
+  blackboard->set("robot_pose", Pose2D{"map", 1.2, 2.3, std::acos(-1) / 2, ""});
+  auto bt = tree("image_content='{pictures}' direction='clockwise'");
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent());
   ASSERT_EQ(events.at(0).at("content").size(), 2);
@@ -132,8 +134,8 @@ TEST_F(SurroundingImagesTest, CounterclockwisePreservesSourceMetadataAndReadsFre
   auto original = pictures();
   original.images.at(2).pose = Pose2D{"odom", 4, 5, 0.6, ""};
   blackboard->set("pictures", original);
-  blackboard->set("yaw", -0.5);
-  auto bt = tree("image_content='{pictures}' yaw='{yaw}' tile_size='96'");
+  blackboard->set("robot_pose", Pose2D{"map", 1.2, 2.3, -0.5, ""});
+  auto bt = tree("image_content='{pictures}' tile_size='96'");
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent());
   expectLayout(output(), false, 96);
@@ -147,7 +149,7 @@ TEST_F(SurroundingImagesTest, CounterclockwisePreservesSourceMetadataAndReadsFre
   const auto retained = blackboard->get<ImageContent>("pictures");
   ASSERT_EQ(retained.images.size(), 8);
   EXPECT_EQ(retained.images.at(0).bytes, original.images.at(0).bytes);
-  blackboard->set("yaw", 0.25);
+  blackboard->set("robot_pose", Pose2D{"map", 1.2, 2.3, 0.25, ""});
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent(2));
   EXPECT_DOUBLE_EQ(payload(1).at("data").at("yaw").get<double>(), 0.25);
@@ -155,7 +157,7 @@ TEST_F(SurroundingImagesTest, CounterclockwisePreservesSourceMetadataAndReadsFre
 TEST_F(SurroundingImagesTest, ShrinksImagesWithoutDistortingAspectRatio)
 {
   blackboard->set("pictures", pictures());
-  auto bt = tree("image_content='{pictures}' yaw='0' tile_size='96'");
+  auto bt = tree("image_content='{pictures}' tile_size='96'");
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent());
   const auto image = output();
@@ -169,7 +171,7 @@ TEST_F(SurroundingImagesTest, InvalidImagesAndParametersFailBeforePublishingAndC
   auto value = pictures();
   value.images.pop_back();
   blackboard->set("pictures", value);
-  auto bt = tree("image_content='{pictures}' yaw='0'");
+  auto bt = tree("image_content='{pictures}'");
   EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::FAILURE);
   value = pictures();
   value.images.push_back(value.images.at(0));
@@ -180,18 +182,55 @@ TEST_F(SurroundingImagesTest, InvalidImagesAndParametersFailBeforePublishingAndC
   blackboard->set("pictures", value);
   EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::FAILURE);
   blackboard->set("pictures", pictures());
-  auto direction = tree("image_content='{pictures}' yaw='0' direction='bad'");
+  auto direction = tree("image_content='{pictures}' direction='bad'");
   EXPECT_EQ(direction.tickRoot(), BT::NodeStatus::FAILURE);
-  auto size = tree("image_content='{pictures}' yaw='0' tile_size='0'");
+  auto size = tree("image_content='{pictures}' tile_size='0'");
   EXPECT_EQ(size.tickRoot(), BT::NodeStatus::FAILURE);
-  blackboard->set("bad_yaw", std::numeric_limits<double>::quiet_NaN());
-  auto yaw = tree("image_content='{pictures}' yaw='{bad_yaw}'");
+  blackboard->set("robot_pose", Pose2D{"map", 0, 0, std::numeric_limits<double>::quiet_NaN(), ""});
+  auto yaw = tree("image_content='{pictures}'");
   EXPECT_EQ(yaw.tickRoot(), BT::NodeStatus::FAILURE);
-  auto missing = tree("image_content='{pictures}'");
-  EXPECT_EQ(missing.tickRoot(), BT::NodeStatus::FAILURE);
+  blackboard->set("robot_pose", Pose2D{"map", 1.2, 2.3, 0.5, ""});
   rclcpp::spin_some(node);
   EXPECT_TRUE(events.empty());
   ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent());
 }
+
+TEST_F(SurroundingImagesTest, UsesBaseTfPoseForCenterYawAndEventWithoutYawInput)
+{
+  blackboard->set("pictures", pictures());
+  auto buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  blackboard->set("tf_buffer", buffer);
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.frame_id = "map";
+  transform.child_frame_id = "base_link";
+  transform.transform.translation.x = 9;
+  transform.transform.rotation.z = std::sin(0.8 / 2);
+  transform.transform.rotation.w = std::cos(0.8 / 2);
+  ASSERT_TRUE(buffer->setTransform(transform, "test", true));
+  auto bt = factory.createTreeFromText(
+    "<root><BehaviorTree ID='Main'><SubmitSurroundingImages image_content='{pictures}'/>"
+    "</BehaviorTree></root>", blackboard);
+  EXPECT_FALSE(factory.manifests().at("SubmitSurroundingImages").ports.count("yaw"));
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent());
+  EXPECT_NEAR(payload().at("data").at("yaw").get<double>(), 0.8, 1e-12);
+  EXPECT_EQ(payload().at("pose").at("yaw"), payload().at("data").at("yaw"));
+  EXPECT_EQ(payload().at("pose").at("x"), 9);
+}
+
+TEST_F(SurroundingImagesTest, StillReportsImagesWhenTfPoseIsUnavailable)
+{
+  blackboard->set("pictures", pictures());
+  blackboard->set("tf_buffer", std::make_shared<tf2_ros::Buffer>(node->get_clock()));
+  auto bt = factory.createTreeFromText(
+    "<root><BehaviorTree ID='Main'><SubmitSurroundingImages image_content='{pictures}'/>"
+    "</BehaviorTree></root>", blackboard);
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent());
+  EXPECT_FALSE(payload().contains("pose"));
+  EXPECT_FALSE(payload().at("data").contains("yaw"));
+  EXPECT_EQ(events.at(0).at("content").size(), 2);
+}
+
 }  // namespace vln_behavior_tree::test

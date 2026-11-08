@@ -44,6 +44,10 @@ protected:
   virtual EventPayload buildPayload();
   /** @brief 使用派生类准备好的图片集合，统一构建事件及图片编码。 */
   EventPayload buildPayload(const ImageContent & images);
+  /** @brief 使用同一份位姿快照构建事件，供图片标注与公共 pose 字段复用。 */
+  EventPayload buildPayload(const ImageContent & images, const std::optional<Pose2D> & pose);
+  /** @brief 读取 pose 输入；为空时获取 map 到 base_link 的最新 TF。 */
+  std::optional<Pose2D> readPose();
 
 private:
   BT::NodeStatus tick() override;

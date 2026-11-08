@@ -234,7 +234,7 @@ TEST_F(NativeImageTest, EightNativeCapturesFeedOneSurroundingImageEvent)
   auto bt = tree(
     "<Sequence><Repeat num_cycles='8'><GetLatestColorImageService "
     "image_content='{pictures}'/></Repeat><SubmitSurroundingImages image_content='{pictures}' "
-    "yaw='0.7' pose='{robot_pose}'/></Sequence>");
+    "pose='{robot_pose}'/></Sequence>");
   ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
   const auto deadline = std::chrono::steady_clock::now() + 2s;
   while (events.empty() && std::chrono::steady_clock::now() < deadline) {

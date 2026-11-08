@@ -1,0 +1,20 @@
+<!-- The action goal position is the current robot position supplied by the caller. -->
+<root main_tree_to_execute="LookAround">
+  <include ros_pkg="vln_behavior_tree" path="behavior_trees/vln_nav2goal.xml"/>
+  <BehaviorTree ID="LookAround">
+    <Sequence name="LookAround">
+      <GetLatestColorImageService operation="clear" image_content="{image_content}"/>
+      <Repeat num_cycles="8">
+        <Sequence name="CaptureAndTurn">
+          <GetLatestColorImageService operation="append" image_content="{image_content}"/>
+          <UpdateGoal goal="{goal}" yaw="yaw + pi / 8"/>
+          <SubTree ID="VlnNav2Goal" __shared_blackboard="true"/>
+        </Sequence>
+      </Repeat>
+      <SubmitSurroundingImages name="ReportLookAround"
+                               event="lookaround_completed"
+                               image_content="{image_content}"
+                               direction="counterclockwise"/>
+    </Sequence>
+  </BehaviorTree>
+</root>

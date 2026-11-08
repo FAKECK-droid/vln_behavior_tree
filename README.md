@@ -269,12 +269,13 @@ operation 和双向 image_content 与工具版相同，支持 append、prepend�
 
 | 新增输入 | 默认值 | 含义 |
 | --- | --- | --- |
-| yaw | 由调用方提供 | map 坐标系当前偏航角，单位弧度，逆时针为正 |
 | direction | counterclockwise | clockwise 顺时针，counterclockwise 逆时针 |
 | tile_size | 256 | 每格边长，单位像素；输出边长为其三倍 |
 
 沿用 EventNodeBase 的 image_content、event、message、pose、time_stamp 和 topic 端口。
-image_content 作为输入保留原来的 8 张图；中央 yaw 在图片上以角度显示。
+image_content 作为输入保留原来的 8 张图。中央 yaw 使用基类 readPose() 获取的位姿，
+默认读取 map → base_link 的最新 TF，也可沿用基类 pose 输入；图片标注与事件 pose 共用该快照。
+中央 yaw 以角度显示，data.yaw 保存弧度值。TF 暂不可用时显示 unavailable，并继续上报图片。
 默认输出 768×768 JPEG，质量 85；事件 content 中包含业务文本和一张合成图。
 images[0] 直接记录 layout、direction、view_count、width、height 等元数据。
 data.yaw 保存弧度值，data.views 按原图顺序保存各图的自定义元数据、采样信息及
@@ -300,12 +301,11 @@ source_index（从 0 开始）、row、column，便于关联原始观测。
 <SubmitSurroundingImages name="ReportSurroundings"
                          event="surroundings"
                          image_content="{pictures}"
-                         yaw="{current_yaw}"
                          direction="counterclockwise"
                          tile_size="256"/>
 ```
 
-合成图由派生类 buildPayload() 准备，再调用基类 buildPayload(images) 构建公共业务字段、
+合成图由派生类 buildPayload() 准备，再调用基类 buildPayload(images, pose) 构建公共业务字段、
 完成一次 Base64 编码并发布。输入图片数量、解码或参数出错时返回 FAILURE。
 
 ## 数值表达式更新导航目标
@@ -358,6 +358,62 @@ blackboard->set("goal_variables", vln_behavior_tree::GoalVariables{
 表达式解析器随包附带，使用 [TinyExpr](https://github.com/codeplea/tinyexpr)，
 版本和 zlib 许可证见 `third_party/tinyexpr/UPSTREAM.md`、`LICENSE`。
 解析器作为私有静态依赖编入节点库，构建时使用包内源码。
+
+## 导航事件节点
+
+加载 `vln_navigation_event_bt_node`，使用 `NavigationEvent` 提交导航过程事件。
+沿用 EventNodeBase 的 event、message、pose、time_stamp、topic、image_content。
+新增输入默认读取导航树已有的同名黑板变量：
+
+| 输入 | 类型 | 写入业务 data |
+| --- | --- | --- |
+| goal | geometry_msgs::msg::PoseStamped | 当前单目标位姿 |
+| goals | std::vector<geometry_msgs::msg::PoseStamped> | 当前多目标序列 |
+| path | nav_msgs::msg::Path | 当前路径，包含 frame_id 与按顺序排列的 poses |
+| number_recoveries | int | 导航恢复次数 |
+
+尚未提供的导航黑板项会省略。位姿使用 frame_id、x/y/z、yaw 和可选真实 UTC time_stamp。
+这些导航数据统一在 buildPayload() 中转换；顶层 pose 表示事件发生时的小车位姿。
+行为树通过 event 和节点所在分支决定事件含义，也可按需重映射上述输入。
+
+```xml
+<NavigationEvent name="ReportNavigationRecovery"
+                  event="navigation_recovery"
+                  message="开始执行恢复动作。"/>
+```
+
+## lookaround 行为树
+
+`behavior_trees/lookaround.xml` 以 `LookAround` 为入口，使用调用方传入的 goal。
+输入 goal 的位置由调用方设置为当前小车位置，树中保留该坐标并更新朝向。
+
+1. clear 清空黑板中的 image_content。
+2. 循环 8 次：获取最新彩色图并 append → UpdateGoal 将 yaw 增加 pi/8 → 执行单目标导航子树。
+3. 循环完成后，SubmitSurroundingImages 提交一张环视合成图，事件为 lookaround_completed。
+
+每次增加 pi/8，8 次累计增加 pi。采图发生在每次目标朝向更新之前。
+子树运行期间使用 Sequence 保持当前步骤，图像采集或子树失败时结束该流程。
+
+| 文件 | 入口 ID | 功能 |
+| --- | --- | --- |
+| vln_nav2goal.xml | VlnNav2Goal | 使用 goal 的单目标导航 |
+| vln_navthroughgoals.xml | VlnNavThroughGoals | 使用 goals 的多目标导航 |
+| lookaround.xml | LookAround | 获取八张图片并依次更新朝向 |
+
+lookaround 通过 ros_pkg include 定位包内 vln_nav2goal.xml，子树采用 Humble / BT.CPP 3 的
+`__shared_blackboard="true"`，复用 goal、path 和 Nav2 宿主配置。
+这种 include 方式也适用于 Humble 读取 XML 文本后创建行为树的加载流程。
+
+在原有 Nav2 plugin_lib_names 中追加：
+
+```yaml
+- vln_get_latest_color_image_service_bt_node
+- vln_update_goal_bt_node
+- vln_submit_surrounding_images_bt_node
+```
+
+NavigateToPose 请求的 behavior_tree 指向安装后的 share/vln_behavior_tree/behavior_trees/lookaround.xml。
+NavigationEvent 可按上面的示例放入需要上报的导航分支。
 
 ## 编译与检查
 
