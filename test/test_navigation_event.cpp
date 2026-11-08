@@ -77,7 +77,7 @@ protected:
   std::vector<Json> events;
 };
 
-TEST_F(NavigationEventTest, ReadsSingleGoalPathAndRecoveriesFromDefaultBlackboardKeys)
+TEST_F(NavigationEventTest, ReadsGoalAndRecoveriesWithoutSubmittingBlackboardPath)
 {
   blackboard->set("goal", pose(3, 4, 0.7));
   nav_msgs::msg::Path path;
@@ -99,8 +99,8 @@ TEST_F(NavigationEventTest, ReadsSingleGoalPathAndRecoveriesFromDefaultBlackboar
   EXPECT_EQ(data.at("goal").at("x"), 3);
   EXPECT_NEAR(data.at("goal").at("yaw").get<double>(), 0.7, 1e-12);
   EXPECT_TRUE(data.at("goal").contains("time_stamp"));
-  EXPECT_EQ(data.at("path").at("poses").size(), 2);
-  EXPECT_EQ(data.at("path").at("poses").at(0).at("frame_id"), "map");
+  EXPECT_FALSE(data.contains("path"));
+  EXPECT_FALSE(factory.manifests().at("NavigationEvent").ports.count("path"));
   EXPECT_EQ(data.at("number_recoveries"), 2);
   EXPECT_FALSE(data.contains("goals"));
   EXPECT_EQ(report.at("pose").at("yaw"), 0.2);
@@ -151,8 +151,7 @@ TEST_F(NavigationEventTest, PreservesImagesAndOmitsUtcSampleStampsInSimulation)
   ASSERT_TRUE(awaitEvent());
   const auto data = payload().at("data");
   EXPECT_FALSE(data.at("goal").contains("time_stamp"));
-  EXPECT_FALSE(data.at("path").contains("time_stamp"));
-  EXPECT_FALSE(data.at("path").at("poses").at(0).contains("time_stamp"));
+  EXPECT_FALSE(data.contains("path"));
   EXPECT_EQ(events.at(0).at("content").size(), 2);
   EXPECT_EQ(payload().at("images").at(0).at("custom_label"), "door");
 }

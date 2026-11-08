@@ -8,7 +8,6 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(nav2_bt_navigator REQUIRED)
 find_package(nav2_core REQUIRED)
@@ -79,7 +78,7 @@ target_link_libraries(vln_submit_surrounding_images_bt_node
 add_library(vln_navigation_event_bt_node SHARED plugins/events/navigation_event.cpp)
 target_compile_features(vln_navigation_event_bt_node PUBLIC cxx_std_17)
 target_compile_definitions(vln_navigation_event_bt_node PRIVATE BT_PLUGIN_EXPORT)
-ament_target_dependencies(vln_navigation_event_bt_node PUBLIC geometry_msgs nav_msgs tf2)
+ament_target_dependencies(vln_navigation_event_bt_node PUBLIC geometry_msgs tf2)
 target_link_libraries(vln_navigation_event_bt_node
   PUBLIC vln_submit_event_bt_node
   PRIVATE vln_agent::vln_agent_utils)
@@ -119,6 +118,7 @@ install(FILES third_party/tinyexpr/LICENSE third_party/tinyexpr/UPSTREAM.md
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(nav_msgs REQUIRED)
   ament_add_gtest(test_event_node test/test_event_node.cpp TIMEOUT 30)
   target_link_libraries(test_event_node vln_submit_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_event_node PRIVATE
@@ -177,6 +177,7 @@ if(BUILD_TESTING)
     "ROS_DOMAIN_ID=191;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
 
   ament_add_gtest(test_navigation_event test/test_navigation_event.cpp TIMEOUT 30)
+  ament_target_dependencies(test_navigation_event nav_msgs)
   target_link_libraries(test_navigation_event vln_navigation_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_navigation_event PRIVATE
     VLN_NAVIGATION_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_navigation_event_bt_node>")
@@ -196,17 +197,19 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_lookaround nav_msgs)
   target_include_directories(test_lookaround PRIVATE ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(test_lookaround vln_submit_surrounding_images_bt_node
-    vln_update_goal_bt_node vln_get_latest_color_image_service_bt_node
+    vln_update_goal_bt_node vln_get_latest_color_image_service_bt_node vln_navigation_event_bt_node
     vln_agent::vln_agent_utils ${OpenCV_LIBRARIES})
   target_compile_definitions(test_lookaround PRIVATE
     VLN_LOOK_NATIVE_PLUGIN="$<TARGET_FILE:vln_get_latest_color_image_service_bt_node>"
     VLN_LOOK_UPDATE_PLUGIN="$<TARGET_FILE:vln_update_goal_bt_node>"
     VLN_LOOK_MOSAIC_PLUGIN="$<TARGET_FILE:vln_submit_surrounding_images_bt_node>"
+    VLN_LOOK_NAVIGATION_EVENT_PLUGIN="$<TARGET_FILE:vln_navigation_event_bt_node>"
     VLN_TEST_RECOVERY_PLUGIN="${VLN_TEST_RECOVERY_PLUGIN}"
     VLN_TEST_PIPELINE_PLUGIN="${VLN_TEST_PIPELINE_PLUGIN}"
     VLN_TEST_RATE_PLUGIN="${VLN_TEST_RATE_PLUGIN}"
     VLN_TEST_ROUND_ROBIN_PLUGIN="${VLN_TEST_ROUND_ROBIN_PLUGIN}"
     VLN_LOOKAROUND_XML="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/lookaround.xml"
+    VLN_SINGLEGOAL_XML="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/vln_nav2goal.xml"
     VLN_MULTIGOAL_XML="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/vln_navthroughgoals.xml")
   set(_lookaround_test_environment
     "ROS_DOMAIN_ID=195"
@@ -226,5 +229,5 @@ endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
 ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json
-  rclcpp geometry_msgs nav_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
+  rclcpp geometry_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
 ament_package()

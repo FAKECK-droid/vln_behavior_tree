@@ -5,7 +5,7 @@
 
 namespace vln_behavior_tree
 {
-/** @brief 使用 Nav2 导航黑板中的目标、路径和恢复次数构建机器事件。 */
+/** @brief 使用 Nav2 导航黑板中的目标和恢复次数构建机器事件。 */
 class NavigationEvent : public EventNodeBase
 {
 public:

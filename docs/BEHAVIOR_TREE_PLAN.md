@@ -202,9 +202,9 @@ TinyExpr 解析器以固定版本随包提供，支持基础数学运算和函�
 
 ## 11. 导航事件与 lookaround
 
-NavigationEvent 复用事件基类，默认从现有导航黑板读取 goal、goals、path、number_recoveries。
+NavigationEvent 复用事件基类，默认从现有导航黑板读取 goal、goals、number_recoveries。
 存在的数据写入 data，缺省项省略；event 与 message 沿用基类端口。
-目标与路径位姿按公共字段形式序列化，保留坐标系、x/y/z、yaw 和真实采样时间。
+目标位姿按公共字段形式序列化，保留坐标系、x/y/z、yaw 和真实采样时间。
 
 两棵导航树采用独立入口 ID：VlnNav2Goal（单目标）与 VlnNavThroughGoals（多目标）。
 lookaround.xml include 单目标树，使用共享黑板复用调用方提供的当前位姿 goal。
@@ -215,3 +215,15 @@ TF 暂不可用时仍提交图片，中央标记 unavailable。
 验证覆盖默认黑板输入、序列化、图片兼容、TF 位姿复用、文本 include 加载、
 八次循环顺序、坐标保持、等待过程、提前失败与 halt。导航叶节点使用本地替身，
 实际图片服务节点、目标更新节点、Nav2 控制节点和事件提交节点参与集成测试。
+
+
+## 12. 默认导航树事件接入
+
+单目标、多目标树均在开始、规划恢复、控制恢复、系统恢复和终态分支放置 NavigationEvent。
+event 使用 navigation_started、navigation_recovery、navigation_completed、navigation_failed；
+origin 和 message 描述具体恢复分支。事件保留目标与恢复次数，path 用于树内规划和跟踪。
+NavigationEvent 的 path 端口与路径序列化已移除。
+
+上报节点通过 ForceSuccess 保持辅助上报语义；导航最终失败分支使用 AlwaysFailure。
+原有规划频率、恢复次数和恢复动作顺序保持不变。
+验证覆盖两棵树的成功、规划/控制/系统恢复、重试耗尽、上报失败和 lookaround 子树事件。

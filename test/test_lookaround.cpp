@@ -20,6 +20,7 @@
 #include <vln_agent/utils/json.hpp>
 
 #include "vln_behavior_tree/event_node_base.hpp"
+#include "vln_behavior_tree/plugins/events/navigation_event.hpp"
 
 namespace vln_behavior_tree::test
 {
@@ -31,7 +32,7 @@ using Service = rgbd_image_queue::srv::GetImage;
 class FollowPathStub : public BT::StatefulActionNode
 {
 public:
-  using Callback = std::function<void (const nav_msgs::msg::Path &, const std::string &)>;
+  using Callback = std::function<BT::NodeStatus(const nav_msgs::msg::Path &, const std::string &)>;
   FollowPathStub(const std::string & name, const BT::NodeConfiguration & config, Callback callback)
   : BT::StatefulActionNode(name, config), callback_(std::move(callback)) {}
   static BT::PortsList providedPorts()
@@ -49,8 +50,7 @@ private:
   }
   BT::NodeStatus onRunning() override
   {
-    callback_(path_, "follow_done");
-    return BT::NodeStatus::SUCCESS;
+    return callback_(path_, "follow_done");
   }
   void onHalted() override {callback_(path_, "halted");}
   Callback callback_;
@@ -83,7 +83,7 @@ protected:
     blackboard->set("tf_buffer", buffer);
     updateTf(goal);
     subscription = host->create_subscription<std_msgs::msg::String>(
-      "/vln/robot_event", 10, [this](std_msgs::msg::String::ConstSharedPtr value) {
+      "/vln/robot_event", 100, [this](std_msgs::msg::String::ConstSharedPtr value) {
         events.push_back(Json::parse(value->data));
       });
     service = camera->create_service<Service>(
@@ -118,6 +118,7 @@ protected:
     factory.registerFromPlugin(VLN_LOOK_NATIVE_PLUGIN);
     factory.registerFromPlugin(VLN_LOOK_UPDATE_PLUGIN);
     factory.registerFromPlugin(VLN_LOOK_MOSAIC_PLUGIN);
+    factory.registerFromPlugin(VLN_LOOK_NAVIGATION_EVENT_PLUGIN);
     factory.registerFromPlugin(VLN_TEST_RECOVERY_PLUGIN);
     factory.registerFromPlugin(VLN_TEST_PIPELINE_PLUGIN);
     factory.registerFromPlugin(VLN_TEST_RATE_PLUGIN);
@@ -132,6 +133,10 @@ protected:
         const auto goal = node.getInput<Pose>("goal").value();
         plans.push_back(goal);
         addTrace("plan");
+        if (consumeFailure(planning_failures)) {
+          node.setOutput("path", nav_msgs::msg::Path{});
+          return BT::NodeStatus::FAILURE;
+        }
         nav_msgs::msg::Path path;
         path.header.frame_id = goal.header.frame_id;
         path.poses.push_back(goal);
@@ -145,28 +150,35 @@ protected:
         return std::make_unique<FollowPathStub>(
           name, config,
           [this](const nav_msgs::msg::Path & path, const std::string & stage) {
+            if (stage == "follow_done" && consumeFailure(follow_failures)) {
+              addTrace("follow_failed");
+              return BT::NodeStatus::FAILURE;
+            }
             addTrace(stage);
             if (stage == "follow_begin") {++follow_started;}
             if (stage == "follow_done") {++follow_completed; updateTf(path.poses.back());}
             if (stage == "halted") {++follow_halted;}
+            return BT::NodeStatus::SUCCESS;
           });
       });
+    const auto recover = [this](BT::TreeNode &) {
+        blackboard->set("number_recoveries", blackboard->get<int>("number_recoveries") + 1);
+        return recovery_fails ? BT::NodeStatus::FAILURE : BT::NodeStatus::SUCCESS;
+      };
     factory.registerSimpleAction(
-      "ClearEntireCostmap", [](BT::TreeNode &) {
-        return BT::NodeStatus::SUCCESS;
-      }, {BT::InputPort<std::string>("service_name")});
+      "ClearEntireCostmap", recover, {BT::InputPort<std::string>("service_name")});
     factory.registerSimpleCondition(
       "GoalUpdated", [](BT::TreeNode &) {
         return BT::NodeStatus::FAILURE;
       });
     factory.registerSimpleAction(
-      "Spin", [](BT::TreeNode &) {return BT::NodeStatus::SUCCESS;},
+      "Spin", recover,
       {BT::InputPort<double>("spin_dist")});
     factory.registerSimpleAction(
-      "Wait", [](BT::TreeNode &) {return BT::NodeStatus::SUCCESS;},
+      "Wait", recover,
       {BT::InputPort<double>("wait_duration")});
     factory.registerSimpleAction(
-      "BackUp", [](BT::TreeNode &) {return BT::NodeStatus::SUCCESS;},
+      "BackUp", recover,
       {BT::InputPort<double>("backup_dist"), BT::InputPort<double>("backup_speed")});
     factory.registerSimpleAction(
       "RemovePassedGoals", [](BT::TreeNode & node) {
@@ -175,14 +187,27 @@ protected:
       }, {BT::InputPort<std::vector<Pose>>("input_goals"),
           BT::OutputPort<std::vector<Pose>>("output_goals"), BT::InputPort<double>("radius")});
     factory.registerSimpleAction(
-      "ComputePathThroughPoses", [](BT::TreeNode & node) {
+      "ComputePathThroughPoses", [this](BT::TreeNode & node) {
+        const auto goals = node.getInput<std::vector<Pose>>("goals").value();
+        plans.push_back(goals.back());
+        addTrace("plan");
+        if (consumeFailure(planning_failures)) {
+          node.setOutput("path", nav_msgs::msg::Path{});
+          return BT::NodeStatus::FAILURE;
+        }
         nav_msgs::msg::Path path;
         path.header.frame_id = "map";
-        path.poses = node.getInput<std::vector<Pose>>("goals").value();
+        path.poses = goals;
         node.setOutput("path", path);
         return BT::NodeStatus::SUCCESS;
       }, {BT::InputPort<std::vector<Pose>>("goals"), BT::OutputPort<nav_msgs::msg::Path>("path"),
           BT::InputPort<std::string>("planner_id")});
+  }
+  bool consumeFailure(int & remaining)
+  {
+    if (remaining == 0) {return false;}
+    if (remaining > 0) {--remaining;}
+    return true;
   }
   void updateTf(const Pose & pose)
   {
@@ -221,20 +246,61 @@ protected:
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (std::chrono::steady_clock::now() < deadline) {
       const auto status = tree.tickRoot();
+      rclcpp::spin_some(host);
       if (status != BT::NodeStatus::RUNNING) {return status;}
       std::this_thread::sleep_for(2ms);
     }
     return BT::NodeStatus::RUNNING;
   }
-  bool awaitEvent()
+  bool awaitEvent(const std::string & type = "lookaround_completed", std::size_t count = 1)
   {
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (std::chrono::steady_clock::now() < deadline) {
       rclcpp::spin_some(host);
-      if (!events.empty()) {return true;}
+      if (eventCount(type) >= count) {return true;}
       std::this_thread::sleep_for(2ms);
     }
     return false;
+  }
+  Json payload(const Json & message)
+  {
+    return Json::parse(message.at("content").at(0).at("text").get<std::string>());
+  }
+  std::size_t eventCount(const std::string & type)
+  {
+    std::size_t count = 0;
+    for (const auto & message : events) {
+      if (payload(message).at("event") == type) {++count;}
+    }
+    return count;
+  }
+  Json findEvent(const std::string & type)
+  {
+    for (const auto & message : events) {
+      if (payload(message).at("event") == type) {return message;}
+    }
+    return Json();
+  }
+  void expectNavigationPayloads()
+  {
+    for (const auto & message : events) {
+      const auto report = payload(message);
+      if (report.at("event").get<std::string>().find("navigation_") != 0) {continue;}
+      EXPECT_EQ(message.at("content").size(), 1);
+      EXPECT_FALSE(report.at("data").contains("path"));
+    }
+  }
+  BT::Tree navigation(bool multiple)
+  {
+    if (multiple) {
+      auto first = blackboard->get<Pose>("goal");
+      auto last = first;
+      last.pose.position.x = 8;
+      blackboard->set("goals", std::vector<Pose>{first, last});
+    }
+    return factory.createTreeFromFile(
+      multiple ? VLN_MULTIGOAL_XML : VLN_SINGLEGOAL_XML,
+      blackboard);
   }
   rclcpp::Node::SharedPtr host, camera;
   rclcpp::Service<Service>::SharedPtr service;
@@ -250,6 +316,8 @@ protected:
   std::vector<std::string> trace;
   std::vector<Json> events;
   int fail_capture{-1}, follow_started{0}, follow_completed{0}, follow_halted{0};
+  int planning_failures{0}, follow_failures{0};
+  bool recovery_fails{false};
   const double initial_yaw{0.3};
 };
 
@@ -279,8 +347,12 @@ TEST_F(LookAroundTest, RepeatsCaptureUpdateAndNavigationEightTimesThenReportsTfY
     EXPECT_EQ(plans.at(i).pose.position.y, -4);
     EXPECT_EQ(requests.at(i).operation, Service::Request::LATEST_COLOR);
   }
-  EXPECT_EQ(events.at(0).at("content").size(), 2);
-  const auto report = Json::parse(events.at(0).at("content").at(0).at("text").get<std::string>());
+  ASSERT_EQ(eventCount("navigation_started"), 8);
+  ASSERT_EQ(eventCount("navigation_completed"), 8);
+  const auto mosaic = findEvent("lookaround_completed");
+  EXPECT_EQ(mosaic.at("content").size(), 2);
+  const auto report = payload(mosaic);
+  expectNavigationPayloads();
   EXPECT_EQ(report.at("event"), "lookaround_completed");
   EXPECT_EQ(report.at("images").size(), 1);
   EXPECT_EQ(report.at("data").at("views").size(), 8);
@@ -300,11 +372,13 @@ TEST_F(LookAroundTest, CaptureFailureStopsBeforeNextTurnAndDoesNotPublishIncompl
   EXPECT_EQ(plans.size(), 2);
   EXPECT_EQ(follow_completed, 2);
   EXPECT_EQ(blackboard->get<ImageContent>("image_content").images.size(), 2);
-  rclcpp::spin_some(host);
-  EXPECT_TRUE(events.empty());
+  ASSERT_TRUE(awaitEvent("navigation_completed", 2));
+  EXPECT_EQ(eventCount("navigation_started"), 2);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  EXPECT_EQ(eventCount("lookaround_completed"), 0);
 }
 
-TEST_F(LookAroundTest, HaltingRunningSubtreeDoesNotRepeatGoalUpdateOrSubmitEvent)
+TEST_F(LookAroundTest, HaltingRunningSubtreeKeepsStartEventWithoutFalseTerminalEvent)
 {
   auto tree = lookaround();
   const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -318,7 +392,11 @@ TEST_F(LookAroundTest, HaltingRunningSubtreeDoesNotRepeatGoalUpdateOrSubmitEvent
   EXPECT_EQ(captures.size(), 1);
   EXPECT_EQ(plans.size(), 1);
   expectAngle(yaw(blackboard->get<Pose>("goal")), initial_yaw + std::acos(-1) / 8);
-  EXPECT_TRUE(events.empty());
+  ASSERT_TRUE(awaitEvent("navigation_started"));
+  EXPECT_EQ(eventCount("navigation_started"), 1);
+  EXPECT_EQ(eventCount("navigation_completed"), 0);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  EXPECT_EQ(eventCount("lookaround_completed"), 0);
 }
 
 TEST_F(LookAroundTest, NamedMultiGoalTreeLoadsIndependently)
@@ -332,4 +410,112 @@ TEST_F(LookAroundTest, NamedMultiGoalTreeLoadsIndependently)
   EXPECT_EQ(follow_completed, 1);
   EXPECT_EQ(blackboard->get<nav_msgs::msg::Path>("path").poses.back().pose.position.x, 8);
 }
+
+class NavigationTreesTest : public LookAroundTest, public ::testing::WithParamInterface<bool>
+{
+public:
+  using LookAroundTest::SetUpTestSuite;
+  using LookAroundTest::TearDownTestSuite;
+};
+
+TEST_P(NavigationTreesTest, ReportsStartAndCompletionOnceAcrossRunningTicksWithoutPath)
+{
+  auto tree = navigation(GetParam());
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent("navigation_started"));
+  ASSERT_TRUE(awaitEvent("navigation_completed"));
+  EXPECT_EQ(eventCount("navigation_started"), 1);
+  EXPECT_EQ(eventCount("navigation_completed"), 1);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  EXPECT_EQ(eventCount("navigation_recovery"), 0);
+  expectNavigationPayloads();
+}
+
+TEST_P(NavigationTreesTest, PlanningRecoveryReportsOnceThenSuccessfulRetryCompletes)
+{
+  planning_failures = 1;
+  auto tree = navigation(GetParam());
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent("navigation_completed"));
+  ASSERT_TRUE(awaitEvent("navigation_recovery"));
+  EXPECT_EQ(eventCount("navigation_started"), 1);
+  EXPECT_EQ(eventCount("navigation_completed"), 1);
+  EXPECT_EQ(eventCount("navigation_recovery"), 1);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  EXPECT_NE(
+    payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
+      "PlanningRecovery"), std::string::npos);
+  EXPECT_EQ(plans.size(), 2);
+  expectNavigationPayloads();
+}
+
+TEST_P(NavigationTreesTest, ControllerRecoveryReportsOnceThenSuccessfulRetryCompletes)
+{
+  follow_failures = 1;
+  auto tree = navigation(GetParam());
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent("navigation_completed"));
+  ASSERT_TRUE(awaitEvent("navigation_recovery"));
+  EXPECT_EQ(eventCount("navigation_recovery"), 1);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  EXPECT_NE(
+    payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
+      "ControlRecovery"), std::string::npos);
+  EXPECT_EQ(follow_started, 2);
+  EXPECT_EQ(follow_completed, 1);
+  expectNavigationPayloads();
+}
+
+TEST_P(NavigationTreesTest, SystemRecoveryAfterContextualRetryExhaustionIsReported)
+{
+  planning_failures = 2;
+  auto tree = navigation(GetParam());
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent("navigation_completed"));
+  ASSERT_TRUE(awaitEvent("navigation_recovery", 2));
+  EXPECT_EQ(eventCount("navigation_recovery"), 2);
+  bool found_system_recovery = false;
+  for (const auto & message : events) {
+    found_system_recovery |=
+      payload(message).at("origin").get<std::string>().find("SystemRecovery") !=
+      std::string::npos;
+  }
+  EXPECT_TRUE(found_system_recovery);
+  EXPECT_EQ(eventCount("navigation_failed"), 0);
+  expectNavigationPayloads();
+}
+
+TEST_P(NavigationTreesTest, ExhaustedNavigationReportsFinalFailureAndKeepsFailureStatus)
+{
+  planning_failures = -1;
+  auto tree = navigation(GetParam());
+  ASSERT_EQ(finish(tree), BT::NodeStatus::FAILURE);
+  ASSERT_TRUE(awaitEvent("navigation_failed"));
+  EXPECT_EQ(eventCount("navigation_started"), 1);
+  EXPECT_EQ(eventCount("navigation_failed"), 1);
+  EXPECT_EQ(eventCount("navigation_completed"), 0);
+  EXPECT_GT(eventCount("navigation_recovery"), 0);
+  expectNavigationPayloads();
+}
+
+TEST_P(NavigationTreesTest, ReportingFailurePreservesBothNavigationSuccessAndFailure)
+{
+  ASSERT_TRUE(factory.unregisterBuilder("NavigationEvent"));
+  factory.registerSimpleAction(
+    "NavigationEvent", [](BT::TreeNode &) {
+      return BT::NodeStatus::FAILURE;
+    }, NavigationEvent::providedPorts());
+  auto successful = navigation(GetParam());
+  EXPECT_EQ(finish(successful), BT::NodeStatus::SUCCESS);
+  planning_failures = -1;
+  recovery_fails = true;
+  auto failed = navigation(GetParam());
+  EXPECT_EQ(finish(failed), BT::NodeStatus::FAILURE);
+  EXPECT_TRUE(events.empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  DefaultTrees, NavigationTreesTest, ::testing::Values(false, true),
+  [](const ::testing::TestParamInfo<bool> & info) {return info.param ? "ThroughGoals" : "ToPose";});
+
 }  // namespace vln_behavior_tree::test

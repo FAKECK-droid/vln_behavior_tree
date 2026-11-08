@@ -4,12 +4,10 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <nav_msgs/msg/path.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
 #include <vln_agent/utils/json.hpp>
@@ -45,14 +43,12 @@ std::string sampleTime(const builtin_interfaces::msg::Time & stamp, bool real_ti
       std::chrono::seconds(stamp.sec) + std::chrono::nanoseconds(stamp.nanosec)));
 }
 
-Json poseJson(
-  const geometry_msgs::msg::PoseStamped & pose, bool real_time,
-  const std::string & fallback_frame = "")
+Json poseJson(const geometry_msgs::msg::PoseStamped & pose, bool real_time)
 {
   const auto & p = pose.pose.position;
   const auto & q = pose.pose.orientation;
   auto result = vln_agent::utils::posePayload(
-    pose.header.frame_id.empty() ? fallback_frame : pose.header.frame_id,
+    pose.header.frame_id,
     p.x, p.y, tf2::getYaw(tf2::Quaternion(q.x, q.y, q.z, q.w)),
     sampleTime(pose.header.stamp, real_time));
   result["z"] = p.z;
@@ -65,9 +61,8 @@ BT::PortsList NavigationEvent::providedPorts()
   auto ports = EventNodeBase::providedPorts();
   ports.insert(BT::InputPort<geometry_msgs::msg::PoseStamped>("goal", "当前单目标导航位姿"));
   ports.insert(BT::InputPort<std::vector<geometry_msgs::msg::PoseStamped>>("goals", "当前多目标序列"));
-  ports.insert(BT::InputPort<nav_msgs::msg::Path>("path", "当前规划路径"));
   ports.insert(BT::InputPort<int>("number_recoveries", "导航恢复次数"));
-  for (const auto & key : {"goal", "goals", "path", "number_recoveries"}) {
+  for (const auto & key : {"goal", "goals", "number_recoveries"}) {
     ports.at(key).setDefaultValue("{" + std::string(key) + "}");
   }
   return ports;
@@ -90,15 +85,6 @@ EventPayload NavigationEvent::buildPayload()
     for (const auto & goal : *goals) {
       data["goals"].push_back(poseJson(goal, !simulated));
     }
-  }
-  if (const auto path = readOptional<nav_msgs::msg::Path>(*this, "path")) {
-    Json description{{"frame_id", path->header.frame_id}, {"poses", Json::array()}};
-    const auto stamp = sampleTime(path->header.stamp, !simulated);
-    if (!stamp.empty()) {description["time_stamp"] = stamp;}
-    for (const auto & pose : path->poses) {
-      description["poses"].push_back(poseJson(pose, !simulated, path->header.frame_id));
-    }
-    data["path"] = std::move(description);
   }
   if (const auto count = readOptional<int>(*this, "number_recoveries")) {
     data["number_recoveries"] = *count;

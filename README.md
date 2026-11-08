@@ -369,11 +369,10 @@ blackboard->set("goal_variables", vln_behavior_tree::GoalVariables{
 | --- | --- | --- |
 | goal | geometry_msgs::msg::PoseStamped | 当前单目标位姿 |
 | goals | std::vector<geometry_msgs::msg::PoseStamped> | 当前多目标序列 |
-| path | nav_msgs::msg::Path | 当前路径，包含 frame_id 与按顺序排列的 poses |
 | number_recoveries | int | 导航恢复次数 |
 
 尚未提供的导航黑板项会省略。位姿使用 frame_id、x/y/z、yaw 和可选真实 UTC time_stamp。
-这些导航数据统一在 buildPayload() 中转换；顶层 pose 表示事件发生时的小车位姿。
+目标与恢复次数统一在 buildPayload() 中转换；顶层 pose 表示事件发生时的小车位姿。
 行为树通过 event 和节点所在分支决定事件含义，也可按需重映射上述输入。
 
 ```xml
@@ -381,6 +380,20 @@ blackboard->set("goal_variables", vln_behavior_tree::GoalVariables{
                   event="navigation_recovery"
                   message="开始执行恢复动作。"/>
 ```
+
+两棵默认导航树已经接入以下事件：
+
+| event | 上报时机 |
+| --- | --- |
+| navigation_started | 每次导航开始 |
+| navigation_recovery | 规划恢复、控制恢复或系统恢复开始，origin 和 message 标识具体分支 |
+| navigation_completed | 导航成功完成 |
+| navigation_failed | 重试耗尽或恢复失败，导航最终返回 FAILURE |
+
+NavigationEvent 提交目标、恢复次数和当前位姿。规划路径保留在导航黑板中供规划与跟踪使用。
+各上报节点由 ForceSuccess 包装，导航结果继续由原有导航分支决定；
+最终失败分支通过 AlwaysFailure 保持 FAILURE。
+使用这两棵默认树时，将 vln_navigation_event_bt_node 加入 Nav2 的 plugin_lib_names。
 
 ## lookaround 行为树
 
@@ -410,10 +423,11 @@ lookaround 通过 ros_pkg include 定位包内 vln_nav2goal.xml，子树采用 H
 - vln_get_latest_color_image_service_bt_node
 - vln_update_goal_bt_node
 - vln_submit_surrounding_images_bt_node
+- vln_navigation_event_bt_node
 ```
 
 NavigateToPose 请求的 behavior_tree 指向安装后的 share/vln_behavior_tree/behavior_trees/lookaround.xml。
-NavigationEvent 可按上面的示例放入需要上报的导航分支。
+lookaround 复用导航子树，每次转向会产生导航开始及终态事件，循环完成后另行提交 lookaround_completed。
 
 ## 编译与检查
 

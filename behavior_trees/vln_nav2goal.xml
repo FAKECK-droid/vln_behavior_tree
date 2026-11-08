@@ -6,31 +6,64 @@
 -->
 <root main_tree_to_execute="VlnNav2Goal">
   <BehaviorTree ID="VlnNav2Goal">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithReplanning">
-        <RateController hz="1.0">
-          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+    <Sequence name="NavigationWithEvents">
+      <ForceSuccess>
+        <NavigationEvent name="ReportPoseNavigationStarted" event="navigation_started" message="开始导航。"/>
+      </ForceSuccess>
+      <Fallback name="NavigationResult">
+        <Sequence name="NavigateAndReportCompletion">
+          <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+            <PipelineSequence name="NavigateWithReplanning">
+              <RateController hz="1.0">
+                <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                  <Sequence name="PlanningRecoveryWithEvent">
+                    <ForceSuccess>
+                      <NavigationEvent name="ReportPosePlanningRecovery" event="navigation_recovery" message="路径规划失败，开始清理全局代价地图。"/>
+                    </ForceSuccess>
+                    <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                  </Sequence>
+                </RecoveryNode>
+              </RateController>
+              <RecoveryNode number_of_retries="1" name="FollowPath">
+                <FollowPath path="{path}" controller_id="FollowPath"/>
+                <Sequence name="ControlRecoveryWithEvent">
+                  <ForceSuccess>
+                    <NavigationEvent name="ReportPoseControlRecovery" event="navigation_recovery" message="路径跟踪失败，开始清理局部代价地图。"/>
+                  </ForceSuccess>
+                  <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                </Sequence>
+              </RecoveryNode>
+            </PipelineSequence>
+            <ReactiveFallback name="RecoveryFallback">
+              <GoalUpdated/>
+              <Sequence name="SystemRecoveryWithEvent">
+                <ForceSuccess>
+                  <NavigationEvent name="ReportPoseSystemRecovery" event="navigation_recovery" message="开始执行系统恢复动作。"/>
+                </ForceSuccess>
+                <RoundRobin name="RecoveryActions">
+                  <Sequence name="ClearingActions">
+                    <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                    <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+                  </Sequence>
+                  <Spin spin_dist="1.57"/>
+                  <Wait wait_duration="5"/>
+                  <BackUp backup_dist="0.30" backup_speed="0.05"/>
+                </RoundRobin>
+              </Sequence>
+            </ReactiveFallback>
           </RecoveryNode>
-        </RateController>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath"/>
-          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-        </RecoveryNode>
-      </PipelineSequence>
-      <ReactiveFallback name="RecoveryFallback">
-        <GoalUpdated/>
-        <RoundRobin name="RecoveryActions">
-          <Sequence name="ClearingActions">
-            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-          </Sequence>
-          <Spin spin_dist="1.57"/>
-          <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
-        </RoundRobin>
-      </ReactiveFallback>
-    </RecoveryNode>
+          <ForceSuccess>
+            <NavigationEvent name="ReportPoseNavigationCompleted" event="navigation_completed" message="已到达导航目标。"/>
+          </ForceSuccess>
+        </Sequence>
+        <Sequence name="ReportFinalNavigationFailure">
+          <ForceSuccess>
+            <NavigationEvent name="ReportPoseNavigationFailed" event="navigation_failed" message="导航最终失败。"/>
+          </ForceSuccess>
+          <AlwaysFailure/>
+        </Sequence>
+      </Fallback>
+    </Sequence>
   </BehaviorTree>
 </root>
