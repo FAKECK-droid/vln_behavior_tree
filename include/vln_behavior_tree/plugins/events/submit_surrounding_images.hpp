@@ -3,7 +3,7 @@
 #include "vln_behavior_tree/event_node_base.hpp"
 namespace vln_behavior_tree
 {
-/** @brief 将八张周围图像缩小排列在外圈，中央显示 yaw，合成为一张图片事件。 */
+/** @brief 将八张周围图像以间隔排列在外圈，中央显示 yaw，可将合并图保存至日志。 */
 class SubmitSurroundingImages : public EventNodeBase
 {
 public:

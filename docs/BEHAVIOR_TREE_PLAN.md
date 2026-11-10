@@ -231,23 +231,29 @@ EventPayload buildPayload() override
 | `image_content` | 八张输入图片，按集合顺序排列 |
 | `direction` | `clockwise` 或 `counterclockwise`，默认后者 |
 | `tile_size` | 每格边长，默认 256 像素 |
+| `gap_size` | 相邻网格的灰色间隔，默认 12 像素；0 为无间隔 |
+| `save_to_log` | 是否保存合并图，默认 false |
 | Event 基类端口 | 事件类型、说明、话题、时间和位姿 |
 
-第一张图片放在 3×3 网格正上方，其余沿指定方向排入外圈。图片等比例缩小、居中留边，并标注从 1 开始的序号。中央显示本次事件位姿中的 yaw 及坐标系，角度显示单位为度。
+第一张图片放在 3×3 网格正上方，其余沿指定方向排入外圈。图片等比例缩小、居中留边，并标注从 1 开始的序号。中央显示本次事件位姿中的 yaw 及坐标系，角度显示单位为度。图片排列以第一张为起点，yaw 是所标坐标系中的当前朝向；中央只显示数值。
 
-输出边长为 `3 × tile_size`，默认 768；JPEG 质量为 85。中央标注和事件顶层 pose 使用同一份 `readPose()` 快照。位姿缺省时，中央显示 `unavailable`。
+输出边长为 `3 × tile_size + 2 × gap_size`，默认 792；JPEG 质量为 85。中央标注和事件顶层 pose 使用同一份 `readPose()` 快照。位姿缺省时，中央显示 `unavailable`。
 
 ```xml
 <SubmitSurroundingImages name="ReportLookAround"
                          event="lookaround_completed"
                          image_content="{pictures}"
                          direction="counterclockwise"
-                         tile_size="256"/>
+                         tile_size="256"
+                         gap_size="12"
+                         save_to_log="true"/>
 ```
+
+`save_to_log="true"` 时，将与事件附件相同的 JPEG 字节保存到 ROS 日志目录的 `vln_behavior_tree/surrounding_images/` 下，并通过日志输出完整路径。目录遵循 ROS 的 `ROS_LOG_DIR`、`ROS_HOME` 和用户目录设置，通常为 `~/.ros/log`。每次调用生成独立文件；保存失败记录警告，事件继续提交。
 
 原始图片集合继续保存在黑板。发布的事件携带一张合成图：
 
-- `images[0]` 描述合成图，包含 `layout/direction/view_count/width/height/time_stamp`。
+- `images[0]` 描述合成图，包含 `layout/direction/view_count/tile_size/gap_size/width/height/time_stamp`。
 - `data.views` 按原图顺序保存自定义元数据、采样信息、`source_index` 和网格 `row/column`。
 - 位姿可用时，`data.yaw` 与顶层 pose 的 yaw 相同。
 
@@ -332,7 +338,7 @@ EventPayload buildPayload() override
 2. 重复八次：获取最新彩色图并 append，执行 `yaw + pi / 4`，运行单目标导航子树。
 3. 执行 SubmitSurroundingImages，发布 `lookaround_completed`。
 
-每次转向为 45°，八次合计一周。该树设置 tile_size 为 512，输出环视图为 1536×1536 像素。目标位置取自调用方提供的当前机器人位姿，各次更新保留其坐标。每次子导航上报相应导航事件，最终事件携带一张环视合成图。
+每次转向为 45°，八次合计一周。该树设置 tile_size 为 512，使用默认的 12 像素间隔，输出环视图为 1560×1560 像素。目标位置取自调用方提供的当前机器人位姿，各次更新保留其坐标。每次子导航上报相应导航事件，最终事件携带一张环视合成图。
 
 Agent 的 `start_lookaround` 工具使用当前 TF 位姿构建 NavigateToPose 目标，并将 `behavior_tree` 指向此文件。取消通过同一 Action 的取消请求处理。
 

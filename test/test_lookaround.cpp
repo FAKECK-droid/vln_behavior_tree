@@ -355,8 +355,8 @@ TEST_F(LookAroundTest, RepeatsCaptureUpdateAndNavigationEightTimesThenReportsTfY
   expectNavigationPayloads();
   EXPECT_EQ(report.at("event"), "lookaround_completed");
   EXPECT_EQ(report.at("images").size(), 1);
-  EXPECT_EQ(report.at("images").at(0).at("width"), 1536);
-  EXPECT_EQ(report.at("images").at(0).at("height"), 1536);
+  EXPECT_EQ(report.at("images").at(0).at("width"), 1560);
+  EXPECT_EQ(report.at("images").at(0).at("height"), 1560);
   EXPECT_EQ(report.at("data").at("views").size(), 8);
   expectAngle(report.at("pose").at("yaw").get<double>(), initial_yaw + 8 * step);
   EXPECT_EQ(report.at("data").at("yaw"), report.at("pose").at("yaw"));

@@ -1,7 +1,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <set>
 #include <limits>
 #include <memory>
 #include <string>
@@ -84,19 +87,33 @@ protected:
           url.find(
             ',') + 1)), cv::IMREAD_COLOR);
   }
-  void expectLayout(const cv::Mat & image, bool clockwise, int size)
+  void expectLayout(const cv::Mat & image, bool clockwise, int size, int gap = 12)
   {
-    ASSERT_EQ(image.cols, size * 3);
-    ASSERT_EQ(image.rows, size * 3);
+    ASSERT_EQ(image.cols, size * 3 + gap * 2);
+    ASSERT_EQ(image.rows, size * 3 + gap * 2);
+    const int stride = size + gap;
     const std::array<cv::Point, 8> ring{{{1, 0}, {2, 0}, {2, 1}, {2, 2},
       {1, 2}, {0, 2}, {0, 1}, {0, 0}}};
     for (std::size_t i = 0; i < colors.size(); ++i) {
       const auto cell = ring.at(clockwise ? i : (8 - i) % 8);
-      const auto pixel = image.at<cv::Vec3b>(cell.y * size + size / 2, cell.x * size + size / 2);
+      const auto pixel =
+        image.at<cv::Vec3b>(cell.y * stride + size / 2, cell.x * stride + size / 2);
       for (int channel = 0; channel < 3; ++channel) {
         EXPECT_NEAR(pixel[channel], colors.at(i)[channel], 8) << "view " << i;
       }
     }
+  }
+  std::set<std::filesystem::path> imageLogs()
+  {
+    const auto directory = std::filesystem::path(rclcpp::get_logging_directory().string()) /
+      "vln_behavior_tree" / "surrounding_images";
+    std::set<std::filesystem::path> files;
+    if (std::filesystem::is_directory(directory)) {
+      for (const auto & item : std::filesystem::directory_iterator(directory)) {
+        if (item.path().extension() == ".jpg") {files.insert(item.path());}
+      }
+    }
+    return files;
   }
   rclcpp::Node::SharedPtr node;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr subscription;
@@ -108,6 +125,7 @@ protected:
 };
 TEST_F(SurroundingImagesTest, PublishesSingleJpegWithClockwiseViewsAndCenterYaw)
 {
+  const auto logs_before = imageLogs();
   blackboard->set("pictures", pictures());
   blackboard->set("robot_pose", Pose2D{"map", 1.2, 2.3, std::acos(-1) / 2, ""});
   auto bt = tree("image_content='{pictures}' direction='clockwise'");
@@ -123,8 +141,13 @@ TEST_F(SurroundingImagesTest, PublishesSingleJpegWithClockwiseViewsAndCenterYaw)
   EXPECT_FALSE(report.at("images").at(0).contains("metadata"));
   EXPECT_EQ(report.at("pose").at("x"), 1.2);
   cv::Mat gray;
-  cv::cvtColor(image(cv::Rect(256, 256, 256, 256)), gray, cv::COLOR_BGR2GRAY);
+  cv::cvtColor(image(cv::Rect(268, 268, 256, 256)), gray, cv::COLOR_BGR2GRAY);
   EXPECT_GT(cv::countNonZero(gray > 100), 100);
+  // 中央下方只保留背景，避免把 map 朝向箭头误认为外圈图片的方向。
+  double maximum = 0;
+  cv::minMaxLoc(gray(cv::Rect(8, 192, 240, 56)), nullptr, &maximum);
+  EXPECT_LT(maximum, 60);
+  EXPECT_EQ(imageLogs(), logs_before);
   const auto path = std::filesystem::path(VLN_MOSAIC_TEST_OUTPUT_DIR);
   std::filesystem::create_directories(path);
   ASSERT_TRUE(cv::imwrite((path / "surrounding_clockwise.jpg").string(), image));
@@ -162,10 +185,73 @@ TEST_F(SurroundingImagesTest, ShrinksImagesWithoutDistortingAspectRatio)
   ASSERT_TRUE(awaitEvent());
   const auto image = output();
   // 源图 320x180 缩到 96x54，上下留边各 21 像素。
-  EXPECT_LT(image.at<cv::Vec3b>(5, 96 + 48)[2], 30);
-  EXPECT_NEAR(image.at<cv::Vec3b>(48, 96 + 48)[2], colors.at(0)[2], 8);
-  EXPECT_LT(image.at<cv::Vec3b>(90, 96 + 48)[2], 30);
+  EXPECT_LT(image.at<cv::Vec3b>(5, 108 + 48)[2], 30);
+  EXPECT_NEAR(image.at<cv::Vec3b>(48, 108 + 48)[2], colors.at(0)[2], 8);
+  EXPECT_LT(image.at<cv::Vec3b>(90, 108 + 48)[2], 30);
 }
+TEST_F(SurroundingImagesTest, SeparatesAdjacentTilesWithConfigurableGaps)
+{
+  blackboard->set("pictures", pictures());
+  auto bt = tree("image_content='{pictures}' tile_size='96' gap_size='20'");
+  ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent());
+  const auto image = output();
+  expectLayout(image, false, 96, 20);
+  for (const auto & point : {cv::Point(106, 48), cv::Point(164, 106)}) {
+    const auto pixel = image.at<cv::Vec3b>(point);
+    for (int channel = 0; channel < 3; ++channel) {
+      EXPECT_NEAR(pixel[channel], 180, 5);
+    }
+  }
+  EXPECT_EQ(payload().at("images").at(0).at("gap_size"), 20);
+  EXPECT_EQ(payload().at("images").at(0).at("tile_size"), 96);
+  auto no_gap = tree("image_content='{pictures}' tile_size='96' gap_size='0'");
+  ASSERT_EQ(no_gap.tickRoot(), BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent(2));
+  expectLayout(output(1), false, 96, 0);
+}
+
+TEST_F(SurroundingImagesTest, SavesExactSubmittedJpegToDistinctLogFilesWhenEnabled)
+{
+  blackboard->set("pictures", pictures());
+  auto bt = tree("image_content='{pictures}' save_to_log='true'");
+  auto previous = imageLogs();
+  for (std::size_t index = 0; index < 2; ++index) {
+    ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
+    ASSERT_TRUE(awaitEvent(index + 1));
+    const auto current = imageLogs();
+    std::vector<std::filesystem::path> created;
+    for (const auto & path : current) {
+      if (!previous.count(path)) {created.push_back(path);}
+    }
+    ASSERT_EQ(created.size(), 1);
+    std::ifstream file(created.front(), std::ios::binary);
+    const std::vector<unsigned char> saved(
+      (std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const auto url = events.at(index).at("content").at(1).at("image_url").get<std::string>();
+    EXPECT_EQ(saved, vln_agent::utils::decodeBase64(url.substr(url.find(',') + 1)));
+    previous = current;
+  }
+}
+
+TEST_F(SurroundingImagesTest, LogWriteFailureStillPublishesEvent)
+{
+  blackboard->set("pictures", pictures());
+  auto bt = tree("image_content='{pictures}' save_to_log='true'");
+  const auto blocker = std::filesystem::path(VLN_MOSAIC_TEST_OUTPUT_DIR) / "log_directory_blocker";
+  std::filesystem::create_directories(blocker.parent_path());
+  std::ofstream(blocker).put('x');
+  const auto environment = std::getenv("ROS_LOG_DIR");
+  const bool was_set = environment != nullptr;
+  const std::string previous = was_set ? environment : "";
+  ASSERT_EQ(setenv("ROS_LOG_DIR", blocker.c_str(), 1), 0);
+  const auto status = bt.tickRoot();
+  if (was_set) {setenv("ROS_LOG_DIR", previous.c_str(), 1);} else {unsetenv("ROS_LOG_DIR");}
+  EXPECT_EQ(status, BT::NodeStatus::SUCCESS);
+  ASSERT_TRUE(awaitEvent());
+  EXPECT_EQ(payload().at("images").size(), 1);
+}
+
 TEST_F(SurroundingImagesTest, InvalidImagesAndParametersFailBeforePublishingAndCanRecover)
 {
   auto value = pictures();
@@ -186,6 +272,10 @@ TEST_F(SurroundingImagesTest, InvalidImagesAndParametersFailBeforePublishingAndC
   EXPECT_EQ(direction.tickRoot(), BT::NodeStatus::FAILURE);
   auto size = tree("image_content='{pictures}' tile_size='0'");
   EXPECT_EQ(size.tickRoot(), BT::NodeStatus::FAILURE);
+  auto gap = tree("image_content='{pictures}' gap_size='-1'");
+  EXPECT_EQ(gap.tickRoot(), BT::NodeStatus::FAILURE);
+  auto overflow = tree("image_content='{pictures}' gap_size='2147483647'");
+  EXPECT_EQ(overflow.tickRoot(), BT::NodeStatus::FAILURE);
   blackboard->set("robot_pose", Pose2D{"map", 0, 0, std::numeric_limits<double>::quiet_NaN(), ""});
   auto yaw = tree("image_content='{pictures}'");
   EXPECT_EQ(yaw.tickRoot(), BT::NodeStatus::FAILURE);
