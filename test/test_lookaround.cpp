@@ -361,7 +361,13 @@ TEST_F(LookAroundTest, RepeatsCaptureUpdateAndNavigationEightTimesThenReportsTfY
   expectAngle(report.at("pose").at("yaw").get<double>(), initial_yaw + 8 * step);
   EXPECT_EQ(report.at("data").at("yaw"), report.at("pose").at("yaw"));
   for (std::size_t i = 0; i < 8; ++i) {
-    EXPECT_EQ(report.at("data").at("views").at(i).at("pair_id"), i + 1);
+    const auto & view = report.at("data").at("views").at(i);
+    EXPECT_EQ(view.at("pair_id"), i + 1);
+    ASSERT_TRUE(view.contains("pose"));
+    EXPECT_EQ(view.at("pose").at("frame_id"), "map");
+    EXPECT_EQ(view.at("pose").at("x"), 3);
+    EXPECT_EQ(view.at("pose").at("y"), -4);
+    expectAngle(view.at("pose").at("yaw").get<double>(), initial_yaw + i * step);
   }
 }
 

@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <behaviortree_cpp_v3/bt_factory.h>
 #include <gtest/gtest.h>
+#include <tf2_ros/buffer.h>
 #include <opencv2/imgcodecs.hpp>
 #include <vln_agent/utils/json.hpp>
 #include "vln_behavior_tree/plugins/services/get_latest_color_image.hpp"
@@ -30,6 +32,8 @@ protected:
     server = std::make_shared<rclcpp::Node>("native_image_service_test");
     blackboard = BT::Blackboard::create();
     blackboard->set("node", host);
+    buffer = std::make_shared<tf2_ros::Buffer>(host->get_clock());
+    blackboard->set("tf_buffer", buffer);
     blackboard->set("bt_loop_duration", 10ms);
     blackboard->set("server_timeout", 20ms);
     blackboard->set("wait_for_service_timeout", std::chrono::milliseconds(2000));
@@ -98,6 +102,19 @@ protected:
     content.images.push_back({{20}, {}, "image/jpeg"});
     return content;
   }
+  void setPose(int seconds, double x, double y, double yaw, bool fixed = false)
+  {
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.frame_id = "map";
+    transform.child_frame_id = "base_link";
+    transform.header.stamp.sec = seconds;
+    transform.transform.translation.x = x;
+    transform.transform.translation.y = y;
+    transform.transform.rotation.z = std::sin(yaw / 2);
+    transform.transform.rotation.w = std::cos(yaw / 2);
+    ASSERT_TRUE(buffer->setTransform(transform, "test", fixed));
+  }
+  std::shared_ptr<tf2_ros::Buffer> buffer;
   rclcpp::Node::SharedPtr host, server;
   rclcpp::Service<Service>::SharedPtr service;
   rclcpp::executors::SingleThreadedExecutor executor;
@@ -123,10 +140,86 @@ TEST_F(NativeImageTest, DirectServiceUsesNativeFieldsAndPreservesBytesAndMetadat
   EXPECT_EQ(image.bytes, response.color.data);
   EXPECT_EQ(image.mime_type, "image/png");
   EXPECT_FALSE(image.time_stamp.empty());
+  EXPECT_FALSE(image.pose.has_value());
   EXPECT_EQ(std::get<std::string>(image.metadata.at("frame_id")), "camera_optical_frame");
   EXPECT_EQ(std::get<std::uint64_t>(image.metadata.at("pair_id")), 99);
   EXPECT_EQ(std::get<std::int64_t>(image.metadata.at("queue_index")), -1);
 }
+TEST_F(NativeImageTest, StoresInterpolatedImageTimePoseAndRetainsEachCapture)
+{
+  const auto sample_time = response.color.header.stamp.sec;
+  const double pi = std::acos(-1);
+  setPose(sample_time - 1, 0, 0, 0);
+  setPose(sample_time + 1, 2, 4, pi / 2);
+  auto bt = tree("<GetLatestColorImageService image_content='{pictures}'/>");
+  ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
+  auto images = blackboard->get<ImageContent>("pictures").images;
+  ASSERT_EQ(images.size(), 1);
+  ASSERT_TRUE(images.at(0).pose.has_value());
+  const auto & pose = *images.at(0).pose;
+  EXPECT_EQ(pose.frame_id, "map");
+  EXPECT_NEAR(pose.x, 1, 1e-12);
+  EXPECT_NEAR(pose.y, 2, 1e-12);
+  EXPECT_NEAR(pose.yaw, pi / 4, 1e-12);
+  EXPECT_EQ(pose.time_stamp, images.at(0).time_stamp);
+  EXPECT_EQ(std::get<std::string>(images.at(0).metadata.at("frame_id")), "camera_optical_frame");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    response.color.header.stamp.sec = sample_time + 1;
+  }
+  ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
+  images = blackboard->get<ImageContent>("pictures").images;
+  ASSERT_EQ(images.size(), 2);
+  ASSERT_TRUE(images.at(0).pose.has_value());
+  ASSERT_TRUE(images.at(1).pose.has_value());
+  EXPECT_NEAR(images.at(0).pose->yaw, pi / 4, 1e-12);
+  EXPECT_NEAR(images.at(1).pose->yaw, pi / 2, 1e-12);
+  EXPECT_NE(images.at(0).pose->time_stamp, images.at(1).pose->time_stamp);
+}
+
+TEST_F(NativeImageTest, ZeroImageTimeUsesLatestTfAndMissingHistoryLeavesPoseEmpty)
+{
+  const auto sample_time = response.color.header.stamp.sec;
+  setPose(sample_time + 1, 3, 4, -0.6);
+  auto bt = tree("<GetLatestColorImageService image_content='{pictures}'/>");
+  ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
+  auto images = blackboard->get<ImageContent>("pictures").images;
+  ASSERT_EQ(images.size(), 1);
+  EXPECT_FALSE(images.at(0).pose.has_value());
+  EXPECT_EQ(images.at(0).bytes, response.color.data);
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    response.color.header.stamp = builtin_interfaces::msg::Time{};
+  }
+  ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
+  images = blackboard->get<ImageContent>("pictures").images;
+  ASSERT_EQ(images.size(), 2);
+  ASSERT_TRUE(images.at(1).pose.has_value());
+  EXPECT_TRUE(images.at(1).time_stamp.empty());
+  EXPECT_EQ(images.at(1).pose->x, 3);
+  EXPECT_EQ(images.at(1).pose->y, 4);
+  EXPECT_NEAR(images.at(1).pose->yaw, -0.6, 1e-12);
+  EXPECT_FALSE(images.at(1).pose->time_stamp.empty());
+}
+
+TEST_F(NativeImageTest, SimulatedImageTimeStillQueriesPoseAndOmitsUtcTime)
+{
+  host->set_parameter(rclcpp::Parameter("use_sim_time", true));
+  response.color.header.stamp.sec = 5;
+  setPose(5, 7, 8, 0.9);
+  setPose(6, 9, 10, 1.2);
+  auto bt = tree("<GetLatestColorImageService image_content='{pictures}'/>");
+  ASSERT_EQ(finish(bt), BT::NodeStatus::SUCCESS);
+  const auto image = blackboard->get<ImageContent>("pictures").images.at(0);
+  ASSERT_TRUE(image.pose.has_value());
+  EXPECT_EQ(image.pose->frame_id, "map");
+  EXPECT_EQ(image.pose->x, 7);
+  EXPECT_EQ(image.pose->y, 8);
+  EXPECT_NEAR(image.pose->yaw, 0.9, 1e-12);
+  EXPECT_TRUE(image.time_stamp.empty());
+  EXPECT_TRUE(image.pose->time_stamp.empty());
+}
+
 TEST_F(NativeImageTest, SupportsSameCollectionOperationsAndClearSubmitsNoRequest)
 {
   for (const auto & operation : {"append", "prepend", "replace 0", "replace -1", "clear"}) {
@@ -225,6 +318,7 @@ TEST_F(NativeImageTest, SimulatedTimestampIsOmittedAndOperationIsFixedWhileWaiti
 }
 TEST_F(NativeImageTest, EightNativeCapturesFeedOneSurroundingImageEvent)
 {
+  setPose(0, 4, 5, 0.6, true);
   std::vector<Json> events;
   auto subscription = host->create_subscription<std_msgs::msg::String>(
     "/vln/robot_event", 10, [&](std_msgs::msg::String::ConstSharedPtr value) {
@@ -247,6 +341,13 @@ TEST_F(NativeImageTest, EightNativeCapturesFeedOneSurroundingImageEvent)
   EXPECT_EQ(events.at(0).at("content").size(), 2);
   const auto payload = Json::parse(events.at(0).at("content").at(0).at("text").get<std::string>());
   EXPECT_EQ(payload.at("images").size(), 1);
-  EXPECT_EQ(payload.at("data").at("views").size(), 8);
+  ASSERT_EQ(payload.at("data").at("views").size(), 8);
+  for (const auto & view : payload.at("data").at("views")) {
+    ASSERT_TRUE(view.contains("pose"));
+    EXPECT_EQ(view.at("pose").at("frame_id"), "map");
+    EXPECT_EQ(view.at("pose").at("x"), 4);
+    EXPECT_EQ(view.at("pose").at("y"), 5);
+    EXPECT_NEAR(view.at("pose").at("yaw").get<double>(), 0.6, 1e-12);
+  }
 }
 }  // namespace vln_behavior_tree::test

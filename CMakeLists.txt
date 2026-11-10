@@ -62,7 +62,7 @@ add_library(vln_get_latest_color_image_service_bt_node SHARED plugins/services/g
 target_compile_features(vln_get_latest_color_image_service_bt_node PUBLIC cxx_std_17)
 target_compile_definitions(vln_get_latest_color_image_service_bt_node PRIVATE BT_PLUGIN_EXPORT)
 ament_target_dependencies(vln_get_latest_color_image_service_bt_node PUBLIC
-  nav2_behavior_tree rclcpp rgbd_image_queue)
+  nav2_behavior_tree rclcpp rgbd_image_queue tf2 tf2_ros)
 target_link_libraries(vln_get_latest_color_image_service_bt_node
   PUBLIC vln_image_content_utils
   PRIVATE vln_agent::vln_agent_utils)

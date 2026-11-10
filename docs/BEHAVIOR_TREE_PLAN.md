@@ -220,7 +220,11 @@ EventPayload buildPayload() override
                             image_content="{pictures}"/>
 ```
 
-服务返回的压缩图片直接存入 `ImageContent`，同时保存 frame_id、格式、配对 ID、索引、队列数量和年龄信息。两个节点均通过公共 `ImageOperation` 完成集合操作。
+服务返回的压缩图片直接存入 `ImageContent`，同时保存 frame_id、格式、配对 ID、索引、队列数量和年龄信息。`GetLatestColorImageService` 按图片的 ROS 时间戳查询 `map → base_link`，将 x、y、yaw 和坐标系写入该张图片的 `ImageContent::Image.pose`。图片的 frame_id 仍表示相机坐标系，pose.frame_id 表示小车位姿所在的 map 坐标系。
+
+TF 优先复用 Nav2 黑板中的 `tf_buffer`；独立使用时建立自己的监听器。图片时间戳为零时读取最新 TF；TF 不可用时记录警告并保留图片，pose 留空。仿真时间用于 TF 查询，UTC 采样时间字段在仿真下省略。`SubmitEvent` 将图片位姿放入 `images[i].pose`，`SubmitSurroundingImages` 将其保留在 `data.views[i].pose`。
+
+两个节点均通过公共 `ImageOperation` 完成集合操作。
 
 ## 6. SubmitSurroundingImages
 

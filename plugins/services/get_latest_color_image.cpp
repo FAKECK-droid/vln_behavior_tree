@@ -3,12 +3,44 @@
 #include <exception>
 #include <utility>
 #include <behaviortree_cpp_v3/bt_factory.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/utils.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <vln_agent/utils/time.hpp>
 namespace vln_behavior_tree
 {
 GetLatestColorImageService::GetLatestColorImageService(
   const std::string & name, const BT::NodeConfiguration & config)
-: Base(name, config, "/rgbd_image_queue/get_image") {}
+: Base(name, config, "/rgbd_image_queue/get_image")
+{
+  config.blackboard->get("tf_buffer", tf_buffer_);
+  if (!tf_buffer_) {
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+  }
+}
+GetLatestColorImageService::~GetLatestColorImageService() = default;
+std::optional<Pose2D> GetLatestColorImageService::lookupPose(
+  const rclcpp::Time & stamp, bool simulated)
+{
+  try {
+    const auto transform = tf_buffer_->lookupTransform("map", "base_link", stamp);
+    const auto & p = transform.transform.translation;
+    const auto & q = transform.transform.rotation;
+    Pose2D pose{"map", p.x, p.y, tf2::getYaw(tf2::Quaternion(q.x, q.y, q.z, q.w)), ""};
+    const auto & time = transform.header.stamp;
+    if (!simulated && (time.sec != 0 || time.nanosec != 0)) {
+      pose.time_stamp = vln_agent::utils::formatUtcTime(
+        std::chrono::system_clock::time_point(
+          std::chrono::seconds(time.sec) + std::chrono::nanoseconds(time.nanosec)));
+    }
+    return pose;
+  } catch (const tf2::TransformException & error) {
+    RCLCPP_WARN(node_->get_logger(), "图片位姿 TF map -> base_link 获取失败: %s", error.what());
+    return std::nullopt;
+  }
+}
 BT::PortsList GetLatestColorImageService::providedPorts()
 {
   auto ports = Base::providedBasicPorts(
@@ -54,6 +86,7 @@ BT::NodeStatus GetLatestColorImageService::on_completion(Service::Response::Shar
       std::chrono::system_clock::time_point(
         std::chrono::seconds(stamp.sec) + std::chrono::nanoseconds(stamp.nanosec)));
   }
+  image.pose = lookupPose(rclcpp::Time(stamp, node_->get_clock()->get_clock_type()), simulated);
   auto content = readImageContent(*this);
   operation_.apply(content, std::move(image));
   writeImageContent(*this, content);
