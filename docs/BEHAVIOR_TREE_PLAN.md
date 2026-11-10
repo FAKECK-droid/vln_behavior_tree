@@ -332,7 +332,7 @@ EventPayload buildPayload() override
 2. 重复八次：获取最新彩色图并 append，执行 `yaw + pi / 4`，运行单目标导航子树。
 3. 执行 SubmitSurroundingImages，发布 `lookaround_completed`。
 
-每次转向为 45°，八次合计一周。目标位置取自调用方提供的当前机器人位姿，各次更新保留其坐标。每次子导航上报相应导航事件，最终事件携带一张环视合成图。
+每次转向为 45°，八次合计一周。该树设置 tile_size 为 512，输出环视图为 1536×1536 像素。目标位置取自调用方提供的当前机器人位姿，各次更新保留其坐标。每次子导航上报相应导航事件，最终事件携带一张环视合成图。
 
 Agent 的 `start_lookaround` 工具使用当前 TF 位姿构建 NavigateToPose 目标，并将 `behavior_tree` 指向此文件。取消通过同一 Action 的取消请求处理。
 

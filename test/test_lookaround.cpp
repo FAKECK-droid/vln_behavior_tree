@@ -334,7 +334,7 @@ TEST_F(LookAroundTest, RepeatsCaptureUpdateAndNavigationEightTimesThenReportsTfY
   EXPECT_EQ(follow_started, 8);
   EXPECT_EQ(follow_completed, 8);
   EXPECT_EQ(blackboard->get<ImageContent>("image_content").images.size(), 8);
-  const double step = std::acos(-1) / 8;
+  const double step = std::acos(-1) / 4;
   ASSERT_EQ(trace.size(), 32);
   for (std::size_t i = 0; i < 8; ++i) {
     EXPECT_EQ(trace.at(i * 4), "capture");
@@ -355,6 +355,8 @@ TEST_F(LookAroundTest, RepeatsCaptureUpdateAndNavigationEightTimesThenReportsTfY
   expectNavigationPayloads();
   EXPECT_EQ(report.at("event"), "lookaround_completed");
   EXPECT_EQ(report.at("images").size(), 1);
+  EXPECT_EQ(report.at("images").at(0).at("width"), 1536);
+  EXPECT_EQ(report.at("images").at(0).at("height"), 1536);
   EXPECT_EQ(report.at("data").at("views").size(), 8);
   expectAngle(report.at("pose").at("yaw").get<double>(), initial_yaw + 8 * step);
   EXPECT_EQ(report.at("data").at("yaw"), report.at("pose").at("yaw"));
@@ -391,7 +393,7 @@ TEST_F(LookAroundTest, HaltingRunningSubtreeKeepsStartEventWithoutFalseTerminalE
   EXPECT_EQ(follow_halted, 1);
   EXPECT_EQ(captures.size(), 1);
   EXPECT_EQ(plans.size(), 1);
-  expectAngle(yaw(blackboard->get<Pose>("goal")), initial_yaw + std::acos(-1) / 8);
+  expectAngle(yaw(blackboard->get<Pose>("goal")), initial_yaw + std::acos(-1) / 4);
   ASSERT_TRUE(awaitEvent("navigation_started"));
   EXPECT_EQ(eventCount("navigation_started"), 1);
   EXPECT_EQ(eventCount("navigation_completed"), 0);
