@@ -7,14 +7,15 @@
       <Repeat num_cycles="8">
         <Sequence name="CaptureAndTurn">
           <GetLatestColorImageService operation="append" image_content="{image_content}"/>
-          <UpdateGoal goal="{goal}" yaw="yaw + pi / 8"/>
+          <UpdateGoal goal="{goal}" yaw="yaw + pi / 4"/>
           <SubTree ID="VlnNav2Goal" __shared_blackboard="true"/>
         </Sequence>
       </Repeat>
       <SubmitSurroundingImages name="ReportLookAround"
                                event="lookaround_completed"
                                image_content="{image_content}"
-                               direction="counterclockwise"/>
+                               direction="counterclockwise"
+                               tile_size="512"/>
     </Sequence>
   </BehaviorTree>
 </root>
