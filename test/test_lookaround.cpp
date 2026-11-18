@@ -140,6 +140,7 @@ protected:
         nav_msgs::msg::Path path;
         path.header.frame_id = goal.header.frame_id;
         path.poses.push_back(goal);
+        path.poses.back().pose.position.x += plan_endpoint_offset;
         node.setOutput("path", path);
         return BT::NodeStatus::SUCCESS;
       }, {BT::InputPort<Pose>("goal"), BT::OutputPort<nav_msgs::msg::Path>("path"),
@@ -154,9 +155,13 @@ protected:
               addTrace("follow_failed");
               return BT::NodeStatus::FAILURE;
             }
+            if (stage == "follow_done" && hold_follow) {return BT::NodeStatus::RUNNING;}
             addTrace(stage);
             if (stage == "follow_begin") {++follow_started;}
-            if (stage == "follow_done") {++follow_completed; updateTf(path.poses.back());}
+            if (stage == "follow_done") {
+              ++follow_completed;
+              if (move_on_follow_success) {updateTf(path.poses.back());}
+            }
             if (stage == "halted") {++follow_halted;}
             return BT::NodeStatus::SUCCESS;
           });
@@ -180,28 +185,7 @@ protected:
     factory.registerSimpleAction(
       "BackUp", recover,
       {BT::InputPort<double>("backup_dist"), BT::InputPort<double>("backup_speed")});
-    factory.registerSimpleAction(
-      "RemovePassedGoals", [](BT::TreeNode & node) {
-        node.setOutput("output_goals", node.getInput<std::vector<Pose>>("input_goals").value());
-        return BT::NodeStatus::SUCCESS;
-      }, {BT::InputPort<std::vector<Pose>>("input_goals"),
-          BT::OutputPort<std::vector<Pose>>("output_goals"), BT::InputPort<double>("radius")});
-    factory.registerSimpleAction(
-      "ComputePathThroughPoses", [this](BT::TreeNode & node) {
-        const auto goals = node.getInput<std::vector<Pose>>("goals").value();
-        plans.push_back(goals.back());
-        addTrace("plan");
-        if (consumeFailure(planning_failures)) {
-          node.setOutput("path", nav_msgs::msg::Path{});
-          return BT::NodeStatus::FAILURE;
-        }
-        nav_msgs::msg::Path path;
-        path.header.frame_id = "map";
-        path.poses = goals;
-        node.setOutput("path", path);
-        return BT::NodeStatus::SUCCESS;
-      }, {BT::InputPort<std::vector<Pose>>("goals"), BT::OutputPort<nav_msgs::msg::Path>("path"),
-          BT::InputPort<std::string>("planner_id")});
+
   }
   bool consumeFailure(int & remaining)
   {
@@ -297,6 +281,9 @@ protected:
       auto last = first;
       last.pose.position.x = 8;
       blackboard->set("goals", std::vector<Pose>{first, last});
+      auto start = first;
+      start.pose.position.x -= 1.0;
+      updateTf(start);
     }
     return factory.createTreeFromFile(
       multiple ? VLN_MULTIGOAL_XML : VLN_SINGLEGOAL_XML,
@@ -317,7 +304,8 @@ protected:
   std::vector<Json> events;
   int fail_capture{-1}, follow_started{0}, follow_completed{0}, follow_halted{0};
   int planning_failures{0}, follow_failures{0};
-  bool recovery_fails{false};
+  bool recovery_fails{false}, hold_follow{false}, move_on_follow_success{true};
+  double plan_endpoint_offset{0.0};
   const double initial_yaw{0.3};
 };
 
@@ -407,16 +395,81 @@ TEST_F(LookAroundTest, HaltingRunningSubtreeKeepsStartEventWithoutFalseTerminalE
   EXPECT_EQ(eventCount("lookaround_completed"), 0);
 }
 
-TEST_F(LookAroundTest, NamedMultiGoalTreeLoadsIndependently)
+TEST_F(LookAroundTest, PlansOnlyToCurrentWaypointUntilRobotEntersItsTolerance)
 {
-  const auto first = blackboard->get<Pose>("goal");
-  auto last = first;
-  last.pose.position.x = 8;
-  blackboard->set("goals", std::vector<Pose>{first, last});
-  auto tree = factory.createTreeFromFile(VLN_MULTIGOAL_XML, blackboard);
+  hold_follow = true;
+  auto tree = navigation(true);
+  const auto goals = blackboard->get<std::vector<Pose>>("goals");
+  ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
+  ASSERT_EQ(follow_started, 1);
+  const auto deadline = std::chrono::steady_clock::now() + 4s;
+  while (plans.size() == 1 && std::chrono::steady_clock::now() < deadline) {
+    ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
+    std::this_thread::sleep_for(10ms);
+  }
+  ASSERT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front()}));
+  EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), goals);
+
+  auto near_first = goals.front();
+  near_first.pose.position.x -= 0.2;
+  updateTf(near_first);
+  ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
+  EXPECT_EQ(follow_halted, 1);
+  EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), std::vector<Pose>{goals.back()});
+  ASSERT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front()}));
+
+  hold_follow = false;
   ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front(), goals.back()}));
   EXPECT_EQ(follow_completed, 1);
-  EXPECT_EQ(blackboard->get<nav_msgs::msg::Path>("path").poses.back().pose.position.x, 8);
+  EXPECT_TRUE(blackboard->get<std::vector<Pose>>("goals").empty());
+  EXPECT_EQ(blackboard->get<nav_msgs::msg::Path>("path").poses.back(), goals.back());
+}
+
+TEST_F(LookAroundTest, RejectsDisplacedPlannerEndpointBeforeStartingControl)
+{
+  plan_endpoint_offset = 0.6;
+  recovery_fails = true;
+  auto tree = navigation(true);
+  const auto goals = blackboard->get<std::vector<Pose>>("goals");
+  ASSERT_EQ(finish(tree), BT::NodeStatus::FAILURE);
+  ASSERT_FALSE(plans.empty());
+  for (const auto & plan : plans) {
+    EXPECT_EQ(plan, goals.front());
+  }
+  EXPECT_EQ(follow_started, 0);
+  EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), goals);
+}
+
+TEST_F(LookAroundTest, ControllerSuccessOutsideWaypointToleranceDoesNotAdvance)
+{
+  move_on_follow_success = false;
+  recovery_fails = true;
+  auto tree = navigation(true);
+  const auto goals = blackboard->get<std::vector<Pose>>("goals");
+  ASSERT_EQ(finish(tree), BT::NodeStatus::FAILURE);
+  EXPECT_EQ(follow_completed, 1);
+  EXPECT_EQ(plans, std::vector<Pose>{goals.front()});
+  EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), goals);
+}
+
+TEST_F(LookAroundTest, ReplacementGoalsHaltActiveSegmentBeforeReplanning)
+{
+  hold_follow = true;
+  auto tree = navigation(true);
+  const auto goals = blackboard->get<std::vector<Pose>>("goals");
+  ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
+  ASSERT_EQ(follow_started, 1);
+
+  auto replacement = goals.back();
+  replacement.pose.position.x += 4;
+  blackboard->set("goals", std::vector<Pose>{replacement});
+  ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
+  EXPECT_EQ(follow_halted, 1);
+  ASSERT_EQ(plans, (std::vector<Pose>{goals.front(), replacement}));
+  hold_follow = false;
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  EXPECT_TRUE(blackboard->get<std::vector<Pose>>("goals").empty());
 }
 
 class NavigationTreesTest : public LookAroundTest, public ::testing::WithParamInterface<bool>
@@ -453,7 +506,7 @@ TEST_P(NavigationTreesTest, PlanningRecoveryReportsOnceThenSuccessfulRetryComple
   EXPECT_NE(
     payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
       "PlanningRecovery"), std::string::npos);
-  EXPECT_EQ(plans.size(), 2);
+  EXPECT_EQ(plans.size(), GetParam() ? 3u : 2u);
   expectNavigationPayloads();
 }
 
@@ -469,8 +522,8 @@ TEST_P(NavigationTreesTest, ControllerRecoveryReportsOnceThenSuccessfulRetryComp
   EXPECT_NE(
     payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
       "ControlRecovery"), std::string::npos);
-  EXPECT_EQ(follow_started, 2);
-  EXPECT_EQ(follow_completed, 1);
+  EXPECT_EQ(follow_started, GetParam() ? 3 : 2);
+  EXPECT_EQ(follow_completed, GetParam() ? 2 : 1);
   expectNavigationPayloads();
 }
 

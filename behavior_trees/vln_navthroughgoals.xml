@@ -1,7 +1,7 @@
 
 <!--
-  This Behavior Tree replans the global path periodically at 1 Hz through an array of poses continuously
-   and it also has recovery actions specific to planning / control as well as general system issues.
+  Each requested pose is a required waypoint. Replan the current leg at 0.333 Hz.
+  Intermediate arrival uses position only; the final leg also uses the controller goal checker.
 -->
 <root main_tree_to_execute="VlnNavThroughGoals">
   <BehaviorTree ID="VlnNavThroughGoals">
@@ -11,34 +11,40 @@
       </ForceSuccess>
       <Fallback name="NavigationResult">
         <Sequence name="NavigateAndReportCompletion">
-          <RecoveryNode number_of_retries="6" name="NavigateRecovery">
-            <PipelineSequence name="NavigateWithReplanning">
-              <RateController hz="0.333">
-                <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
-                  <ReactiveSequence>
-                    <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
-                    <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-                  </ReactiveSequence>
-                  <Sequence name="PlanningRecoveryWithEvent">
-                    <ForceSuccess>
-                      <NavigationEvent name="ReportGoalsPlanningRecovery" event="navigation_recovery" message="路径规划失败，开始清理全局代价地图。"/>
-                    </ForceSuccess>
-                    <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                  </Sequence>
-                </RecoveryNode>
-              </RateController>
-              <RecoveryNode number_of_retries="1" name="FollowPath">
-                <FollowPath path="{path}" controller_id="FollowPath"/>
-                <Sequence name="ControlRecoveryWithEvent">
-                  <ForceSuccess>
-                    <NavigationEvent name="ReportGoalsControlRecovery" event="navigation_recovery" message="路径跟踪失败，开始清理局部代价地图。"/>
-                  </ForceSuccess>
-                  <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <FollowWaypoints goals="{goals}" waypoint="{waypoint}" is_final="{is_final}" path="{path}">
+            <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+              <ReactiveFallback name="CompleteOrFollowWaypoint">
+                <WaypointPositionReached waypoint="{waypoint}" is_final="{is_final}" xy_tolerance="0.30"/>
+                <Sequence name="FollowAndConfirmWaypoint">
+                  <PipelineSequence name="NavigateWithReplanning">
+                    <RateController hz="0.333">
+                      <RecoveryNode number_of_retries="1" name="ComputeWaypointPath">
+                        <Sequence>
+                          <ComputePathToPose goal="{waypoint}" path="{candidate_path}" planner_id="GridBased"/>
+                          <ValidateWaypointPath waypoint="{waypoint}" candidate_path="{candidate_path}"
+                                                xy_tolerance="0.10" path="{path}"/>
+                        </Sequence>
+                        <Sequence name="PlanningRecoveryWithEvent">
+                          <ForceSuccess>
+                            <NavigationEvent name="ReportGoalsPlanningRecovery" event="navigation_recovery" message="路径规划失败，开始清理全局代价地图。"/>
+                          </ForceSuccess>
+                          <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                        </Sequence>
+                      </RecoveryNode>
+                    </RateController>
+                    <RecoveryNode number_of_retries="1" name="FollowPath">
+                      <FollowPath path="{path}" controller_id="FollowPath"/>
+                      <Sequence name="ControlRecoveryWithEvent">
+                        <ForceSuccess>
+                          <NavigationEvent name="ReportGoalsControlRecovery" event="navigation_recovery" message="路径跟踪失败，开始清理局部代价地图。"/>
+                        </ForceSuccess>
+                        <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                      </Sequence>
+                    </RecoveryNode>
+                  </PipelineSequence>
+                  <WaypointPositionReached waypoint="{waypoint}" xy_tolerance="0.30"/>
                 </Sequence>
-              </RecoveryNode>
-            </PipelineSequence>
-            <ReactiveFallback name="RecoveryFallback">
-              <GoalUpdated/>
+              </ReactiveFallback>
               <Sequence name="SystemRecoveryWithEvent">
                 <ForceSuccess>
                   <NavigationEvent name="ReportGoalsSystemRecovery" event="navigation_recovery" message="开始执行系统恢复动作。"/>
@@ -53,8 +59,8 @@
                   <BackUp backup_dist="0.30" backup_speed="0.05"/>
                 </RoundRobin>
               </Sequence>
-            </ReactiveFallback>
-          </RecoveryNode>
+            </RecoveryNode>
+          </FollowWaypoints>
           <ForceSuccess>
             <NavigationEvent name="ReportGoalsNavigationCompleted" event="navigation_completed" message="已到达导航目标。"/>
           </ForceSuccess>

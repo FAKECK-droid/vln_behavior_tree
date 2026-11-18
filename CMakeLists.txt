@@ -8,6 +8,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(nav2_util REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(nav2_bt_navigator REQUIRED)
 find_package(nav2_core REQUIRED)
@@ -92,7 +94,8 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(vln_goal_expression PRIVATE -Wno-pedantic)
 endif()
 
-add_library(vln_update_goal_bt_node SHARED plugins/actions/update_goal.cpp)
+add_library(vln_update_goal_bt_node SHARED
+  plugins/actions/update_goal.cpp plugins/actions/follow_waypoints.cpp)
 target_compile_features(vln_update_goal_bt_node PUBLIC cxx_std_17)
 target_compile_definitions(vln_update_goal_bt_node PRIVATE BT_PLUGIN_EXPORT)
 target_include_directories(vln_update_goal_bt_node PUBLIC
@@ -100,7 +103,7 @@ target_include_directories(vln_update_goal_bt_node PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_include_directories(vln_update_goal_bt_node SYSTEM PRIVATE third_party/tinyexpr)
 ament_target_dependencies(vln_update_goal_bt_node PUBLIC
-  behaviortree_cpp_v3 geometry_msgs rclcpp tf2)
+  behaviortree_cpp_v3 geometry_msgs nav_msgs nav2_util rclcpp tf2 tf2_ros)
 target_link_libraries(vln_update_goal_bt_node PRIVATE vln_goal_expression)
 
 install(TARGETS vln_submit_event_bt_node vln_call_tool_bt_node vln_get_latest_color_image_bt_node
@@ -118,7 +121,6 @@ install(FILES third_party/tinyexpr/LICENSE third_party/tinyexpr/UPSTREAM.md
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  find_package(nav_msgs REQUIRED)
   ament_add_gtest(test_event_node test/test_event_node.cpp TIMEOUT 30)
   target_link_libraries(test_event_node vln_submit_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_event_node PRIVATE
@@ -229,5 +231,5 @@ endif()
 
 ament_export_targets(export_vln_event_nodes HAS_LIBRARY_TARGET)
 ament_export_dependencies(behaviortree_cpp_v3 nav2_behavior_tree nlohmann_json
-  rclcpp geometry_msgs std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
+  rclcpp geometry_msgs nav_msgs nav2_util std_msgs tf2 tf2_ros vln_agent rgbd_image_queue OpenCV)
 ament_package()

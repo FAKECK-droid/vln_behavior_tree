@@ -137,7 +137,13 @@ BT::NodeStatus UpdateGoal::tick()
 }
 }  // namespace vln_behavior_tree
 
+namespace vln_behavior_tree
+{
+void registerWaypointNodes(BT::BehaviorTreeFactory & factory);
+}
+
 BT_REGISTER_NODES(factory)
 {
   factory.registerNodeType<vln_behavior_tree::UpdateGoal>("UpdateGoal");
+  vln_behavior_tree::registerWaypointNodes(factory);
 }
