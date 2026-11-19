@@ -22,7 +22,7 @@
                         <Sequence>
                           <ComputePathToPose goal="{waypoint}" path="{candidate_path}" planner_id="GridBased"/>
                           <ValidateWaypointPath waypoint="{waypoint}" candidate_path="{candidate_path}"
-                                                xy_tolerance="0.10" path="{path}"/>
+                                                xy_tolerance="0.50" path="{path}"/>
                         </Sequence>
                         <Sequence name="PlanningRecoveryWithEvent">
                           <ForceSuccess>

@@ -6,7 +6,9 @@
       <GetLatestColorImageService operation="clear" image_content="{image_content}"/>
       <Repeat num_cycles="8">
         <Sequence name="CaptureAndTurn">
-          <GetLatestColorImageService operation="append" image_content="{image_content}"/>
+          <Delay delay_msec="500">
+            <GetLatestColorImageService operation="append" image_content="{image_content}"/>
+          </Delay>
           <UpdateGoal goal="{goal}" yaw="yaw + pi / 4"/>
           <SubTree ID="VlnNav2Goal" __shared_blackboard="true"/>
         </Sequence>
@@ -15,7 +17,8 @@
                                event="lookaround_completed"
                                image_content="{image_content}"
                                direction="counterclockwise"
-                               tile_size="512"/>
+                               tile_size="512"
+                               save_to_log="true" />
     </Sequence>
   </BehaviorTree>
 </root>
