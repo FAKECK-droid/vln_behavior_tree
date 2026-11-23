@@ -77,12 +77,15 @@ target_link_libraries(vln_submit_surrounding_images_bt_node
   PUBLIC vln_submit_event_bt_node
   PRIVATE vln_agent::vln_agent_utils ${OpenCV_LIBRARIES})
 
-add_library(vln_navigation_event_bt_node SHARED plugins/events/navigation_event.cpp)
+add_library(vln_navigation_event_bt_node SHARED
+  plugins/events/navigation_event.cpp
+  plugins/events/submit_surroundings.cpp
+  plugins/tools/get_surroundings.cpp)
 target_compile_features(vln_navigation_event_bt_node PUBLIC cxx_std_17)
 target_compile_definitions(vln_navigation_event_bt_node PRIVATE BT_PLUGIN_EXPORT)
 ament_target_dependencies(vln_navigation_event_bt_node PUBLIC geometry_msgs tf2)
 target_link_libraries(vln_navigation_event_bt_node
-  PUBLIC vln_submit_event_bt_node
+  PUBLIC vln_submit_event_bt_node vln_call_tool_bt_node
   PRIVATE vln_agent::vln_agent_utils)
 
 add_library(vln_goal_expression STATIC third_party/tinyexpr/tinyexpr.c)
@@ -182,7 +185,9 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_navigation_event nav_msgs)
   target_link_libraries(test_navigation_event vln_navigation_event_bt_node vln_agent::vln_agent_utils)
   target_compile_definitions(test_navigation_event PRIVATE
-    VLN_NAVIGATION_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_navigation_event_bt_node>")
+    VLN_NAVIGATION_EVENT_PLUGIN_PATH="$<TARGET_FILE:vln_navigation_event_bt_node>"
+    VLN_REPORT_WAYPOINT_PLUGIN_PATH="$<TARGET_FILE:vln_update_goal_bt_node>")
+  add_dependencies(test_navigation_event vln_update_goal_bt_node)
   set_tests_properties(test_navigation_event PROPERTIES ENVIRONMENT
     "ROS_DOMAIN_ID=197;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros-logs")
 

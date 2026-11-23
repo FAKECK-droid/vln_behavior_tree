@@ -11,7 +11,8 @@
       </ForceSuccess>
       <Fallback name="NavigationResult">
         <Sequence name="NavigateAndReportCompletion">
-          <FollowWaypoints goals="{goals}" waypoint="{waypoint}" is_final="{is_final}" path="{path}">
+          <FollowWaypoints goals="{goals}" waypoint="{waypoint}" is_final="{is_final}"
+                           route_revision="{route_revision}" path="{path}">
             <RecoveryNode number_of_retries="6" name="NavigateRecovery">
               <ReactiveFallback name="CompleteOrFollowWaypoint">
                 <WaypointPositionReached waypoint="{waypoint}" is_final="{is_final}" xy_tolerance="0.30"/>
@@ -33,7 +34,14 @@
                       </RecoveryNode>
                     </RateController>
                     <RecoveryNode number_of_retries="1" name="FollowPath">
-                      <FollowPath path="{path}" controller_id="FollowPath"/>
+                      <ReportNearWaypoint waypoint="{waypoint}" is_final="{is_final}"
+                                          route_revision="{route_revision}" distance_m="1.0">
+                        <FollowPath path="{path}" controller_id="FollowPath"/>
+                        <Sequence name="ReportFinalWaypointSurroundings">
+                          <GetSurroundings costmap="local" range_m="6.0" output="{surroundings}"/>
+                          <SubmitSurroundings name="ReportSurroundingsNearFinalWaypoint" input="{surroundings}"/>
+                        </Sequence>
+                      </ReportNearWaypoint>
                       <Sequence name="ControlRecoveryWithEvent">
                         <ForceSuccess>
                           <NavigationEvent name="ReportGoalsControlRecovery" event="navigation_recovery" message="路径跟踪失败，开始清理局部代价地图。"/>

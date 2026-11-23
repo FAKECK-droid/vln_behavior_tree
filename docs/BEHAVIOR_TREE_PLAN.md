@@ -20,8 +20,8 @@ Nav2 黑板 / 节点端口
 | `GetLatestColorImage` | `vln_get_latest_color_image_bt_node` |
 | `GetLatestColorImageService` | `vln_get_latest_color_image_service_bt_node` |
 | `SubmitSurroundingImages` | `vln_submit_surrounding_images_bt_node` |
-| `NavigationEvent` | `vln_navigation_event_bt_node` |
-| `UpdateGoal` | `vln_update_goal_bt_node` |
+| `NavigationEvent`、`GetSurroundings`、`SubmitSurroundings` | `vln_navigation_event_bt_node` |
+| `UpdateGoal`、`ReportNearWaypoint` | `vln_update_goal_bt_node` |
 
 这些库按使用情况加入 `bt_navigator.ros__parameters.plugin_lib_names`。包内的 `vln_image_content_utils` 是图片集合辅助库，由对应插件链接。
 
@@ -154,7 +154,7 @@ EventPayload buildPayload() override
 
 公共接口见 [call_tool_node_base.hpp](../include/vln_behavior_tree/call_tool_node_base.hpp)。
 
-基类继承 `nav2_behavior_tree::BtServiceNode<vln_agent::srv::ToolCall>`，注册为 `CallTool`。
+基类注册为 `CallTool`，在 tick 中异步等待 `vln_agent::srv::ToolCall` 就绪，并轮询工具结果。
 
 | 端口 | 方向与类型 | 用途 |
 | --- | --- | --- |
@@ -184,7 +184,11 @@ EventPayload buildPayload() override
 
 结束、异常和 `halt()` 会清理本地挂起请求与响应数据。已提交工具由 Agent 继续执行，动作取消通过对应取消工具发起。
 
-服务中的 `function_call_output` 用于关联本次机器人调用。需要将结果交给模型时，调用方把观测数据或图片写入事件，再由 Event 节点发布。
+服务中的 `function_call_output` 用于关联本次机器人调用。可重写 `onOutput()` 以原样传递该 JSON。
+
+`GetSurroundings` 接收 `costmap`、`range_m`，通过 `output` 端口交付原生 `function_call_output`。`SubmitSurroundings` 通过 `input` 端口读取该对象，将 `environment_id`、拍摄位姿、图片元数据和原生 PNG 内容写入 `surroundings` 事件。
+
+多点导航的 `ReportNearWaypoint` 在最后一段平面距离达到 `distance_m` 时执行一次上报分支。多点树示例设为 1.0 米，依次请求 6.0 米宽的局部代价地图并上报。上报期间仍 tick 路径跟踪，上报失败由导航主分支独立处理。
 
 ## 5. 彩色图像获取
 

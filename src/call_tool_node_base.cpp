@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <behaviortree_cpp_v3/bt_factory.h>
+#include <nav2_behavior_tree/bt_conversions.hpp>
 
 namespace vln_behavior_tree
 {
@@ -33,21 +34,22 @@ std::string nextCallId()
 
 CallToolNodeBase::CallToolNodeBase(
   const std::string & name, const BT::NodeConfiguration & config)
-: Base(name, config, "/vln/tool_call")
+: BT::ActionNodeBase(name, config),
+  node_(config.blackboard->get<rclcpp::Node::SharedPtr>("node")),
+  callback_group_(node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false))
 {
+  executor_.add_callback_group(callback_group_, node_->get_node_base_interface());
 }
 
 BT::PortsList CallToolNodeBase::providedPorts()
 {
-  auto ports = Base::providedBasicPorts(
-    {
-      BT::InputPort<std::string>("tool", "Agent 中启用的工具函数名"),
-      BT::InputPort<std::string>("arguments", "{}", "工具参数 JSON 对象"),
-      BT::OutputPort<ToolResult>("result", "工具业务 payload 及原生图片")});
-  ports.at("service_name") = BT::InputPort<std::string>(
-    "service_name", "/vln/tool_call", "Agent 工具调用服务").second;
+  BT::PortsList ports{
+    BT::InputPort<std::string>("tool", "Agent 中启用的工具函数名"),
+    BT::InputPort<std::string>("arguments", "{}", "工具参数 JSON 对象"),
+    BT::OutputPort<ToolResult>("result", "工具业务 payload 及原生图片"),
+    BT::InputPort<std::string>("service_name", "/vln/tool_call", "Agent 工具调用服务"),
+    BT::InputPort<std::chrono::milliseconds>("server_timeout", "工具服务与结果的总等待时间，单位毫秒")};
   ports.at("server_timeout").setDefaultValue("5000");
-  ports.at("server_timeout").setDescription("等待完整工具结果的超时，单位毫秒");
   return ports;
 }
 
@@ -90,6 +92,11 @@ BT::NodeStatus CallToolNodeBase::on_completion(Service::Response::SharedPtr resp
   if (output.at("type") != "function_call_output" || output.at("call_id") != call_id_) {
     throw BT::RuntimeError("ToolCall 返回的工具结果与当前调用不对应");
   }
+  return onOutput(std::move(output));
+}
+
+BT::NodeStatus CallToolNodeBase::onOutput(Json output)
+{
   auto & content = output.at("output");
   if (!content.is_array() || content.empty() || content.at(0).at("type") != "input_text") {
     throw BT::RuntimeError("ToolCall 结果需要包含首个 input_text 业务载荷");
@@ -111,9 +118,34 @@ BT::NodeStatus CallToolNodeBase::onResult(const ToolResult & result)
 BT::NodeStatus CallToolNodeBase::tick()
 {
   try {
-    const auto status = Base::tick();
-    if (status != BT::NodeStatus::RUNNING) {resetRequest();}
-    return status;
+    const auto now = std::chrono::steady_clock::now();
+    if (deadline_ == std::chrono::steady_clock::time_point{}) {
+      const auto service_name = getInput<std::string>("service_name").value();
+      if (!client_ || service_name != service_name_) {
+        client_ = node_->create_client<Service>(
+          service_name, rclcpp::ServicesQoS().get_rmw_qos_profile(), callback_group_);
+        service_name_ = service_name;
+      }
+      on_tick();
+      deadline_ = now +
+        config().blackboard->get<std::chrono::milliseconds>("wait_for_service_timeout");
+    }
+    if (!pending_ && client_->service_is_ready()) {
+      pending_.emplace(client_->async_send_request(request_));
+      deadline_ = now + getInput<std::chrono::milliseconds>("server_timeout").value();
+    }
+    if (pending_) {
+      executor_.spin_some();
+      if (pending_->future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        const auto status = on_completion(pending_->future.get());
+        resetRequest();
+        return status;
+      }
+    }
+    if (now < deadline_) {return BT::NodeStatus::RUNNING;}
+    RCLCPP_WARN(node_->get_logger(), "工具节点 '%s' 等待结果超时", name().c_str());
+    resetRequest();
+    return BT::NodeStatus::FAILURE;
   } catch (const std::exception & error) {
     resetRequest();
     RCLCPP_ERROR(node_->get_logger(), "工具节点 '%s' 调用失败: %s", name().c_str(), error.what());
@@ -123,16 +155,16 @@ BT::NodeStatus CallToolNodeBase::tick()
 
 void CallToolNodeBase::resetRequest()
 {
-  service_client_->prune_pending_requests();
-  request_sent_ = false;
-  future_result_ = {};
+  if (pending_) {client_->remove_pending_request(*pending_);}
+  pending_.reset();
+  deadline_ = {};
   request_->request_json.clear();
 }
 
 void CallToolNodeBase::halt()
 {
   resetRequest();
-  Base::halt();
+  setStatus(BT::NodeStatus::IDLE);
 }
 }  // namespace vln_behavior_tree
 

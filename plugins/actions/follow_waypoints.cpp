@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -6,6 +7,7 @@
 #include <vector>
 
 #include <behaviortree_cpp_v3/bt_factory.h>
+#include <behaviortree_cpp_v3/control_node.h>
 #include <behaviortree_cpp_v3/decorator_node.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav2_util/robot_utils.hpp>
@@ -45,7 +47,7 @@ public:
   {
     return {BT::BidirectionalPort<Goals>("goals"),
       BT::OutputPort<Pose>("waypoint"), BT::OutputPort<bool>("is_final"),
-      BT::OutputPort<Path>("path")};
+      BT::OutputPort<Path>("path"), BT::OutputPort<std::uint64_t>("route_revision")};
   }
 
   void halt() override
@@ -73,12 +75,16 @@ private:
         return BT::NodeStatus::FAILURE;
       }
       remaining_ = std::move(goals);
+      ++route_revision_;
       setOutput("goals", *remaining_);
     }
 
     setStatus(BT::NodeStatus::RUNNING);
     setOutput("waypoint", remaining_->front());
     setOutput("is_final", remaining_->size() == 1);
+    if (config().output_ports.count("route_revision")) {
+      setOutput("route_revision", route_revision_);
+    }
     const auto result = child_node_->executeTick();
     if (result != BT::NodeStatus::SUCCESS) {
       return result;
@@ -121,6 +127,72 @@ private:
   std::string global_frame_;
   double transform_timeout_;
   std::optional<Goals> remaining_;
+  std::uint64_t route_revision_{0};
+};
+
+/** @brief 并行跟踪路径与接近事件，事件失败独立于导航结果。 */
+class ReportNearWaypoint : public BT::ControlNode
+{
+public:
+  ReportNearWaypoint(const std::string & name, const BT::NodeConfiguration & config)
+  : BT::ControlNode(name, config),
+    tf_(config.blackboard->get<std::shared_ptr<tf2_ros::Buffer>>("tf_buffer"))
+  {
+    const auto node = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
+    node->get_parameter_or("robot_base_frame", robot_frame_, std::string("base_link"));
+  }
+
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<Pose>("waypoint"), BT::InputPort<bool>("is_final"),
+      BT::InputPort<std::uint64_t>("route_revision"),
+      BT::InputPort<double>("distance_m", 1.0, "触发时与末航点的最大平面距离，单位米")};
+  }
+
+private:
+  BT::NodeStatus tick() override
+  {
+    if (childrenCount() != 2) {throw BT::LogicError("ReportNearWaypoint 需要路径跟踪和上报两个子节点");}
+    auto & follow = *children_nodes_[0];
+    auto & report = *children_nodes_[1];
+    const auto follow_status = follow.status() == BT::NodeStatus::SUCCESS ?
+      BT::NodeStatus::SUCCESS : follow.executeTick();
+    if (follow_status == BT::NodeStatus::FAILURE) {
+      resetChildren();
+      return follow_status;
+    }
+
+    auto report_status = report.status();
+    if (report_status == BT::NodeStatus::RUNNING) {
+      report_status = report.executeTick();
+    } else if (getInput<bool>("is_final").value()) {
+      const auto revision = getInput<std::uint64_t>("route_revision").value();
+      if (revision != reported_revision_ && nearWaypoint()) {
+        reported_revision_ = revision;
+        report_status = report.executeTick();
+      }
+    }
+    if (follow_status == BT::NodeStatus::RUNNING || report_status == BT::NodeStatus::RUNNING) {
+      return BT::NodeStatus::RUNNING;
+    }
+
+    resetChildren();
+    return follow_status;
+  }
+
+  bool nearWaypoint() const
+  {
+    const auto waypoint = getInput<Pose>("waypoint").value();
+    const auto distance = getInput<double>("distance_m").value();
+    Pose robot;
+    return tf_->canTransform(waypoint.header.frame_id, robot_frame_, tf2::TimePointZero) &&
+           nav2_util::getCurrentPose(robot, *tf_, waypoint.header.frame_id, robot_frame_, 0.0) &&
+           withinPositionTolerance(robot, waypoint, distance);
+  }
+
+  std::shared_ptr<tf2_ros::Buffer> tf_;
+  std::string robot_frame_;
+  std::uint64_t reported_revision_{0};
 };
 
 class ValidateWaypointPath : public BT::SyncActionNode
@@ -211,6 +283,7 @@ private:
 void registerWaypointNodes(BT::BehaviorTreeFactory & factory)
 {
   factory.registerNodeType<FollowWaypoints>("FollowWaypoints");
+  factory.registerNodeType<ReportNearWaypoint>("ReportNearWaypoint");
   factory.registerNodeType<ValidateWaypointPath>("ValidateWaypointPath");
   factory.registerNodeType<WaypointPositionReached>("WaypointPositionReached");
 }

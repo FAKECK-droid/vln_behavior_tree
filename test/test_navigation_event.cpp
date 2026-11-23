@@ -9,6 +9,8 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <gtest/gtest.h>
 #include <nav_msgs/msg/path.hpp>
+#include <tf2_ros/buffer.h>
+#include <vln_agent/srv/tool_call.hpp>
 #include <vln_agent/utils/json.hpp>
 
 #include "vln_behavior_tree/plugins/events/navigation_event.hpp"
@@ -167,5 +169,109 @@ TEST_F(NavigationEventTest, IncorrectTypedDataFailsWithoutPublishingAndCanBeCorr
   blackboard->set("goal", pose(3, 4, 0));
   EXPECT_EQ(corrected.tickRoot(), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent());
+}
+class TrackPath : public BT::StatefulActionNode
+{
+public:
+  using BT::StatefulActionNode::StatefulActionNode;
+  static BT::PortsList providedPorts() {return {};}
+
+private:
+  BT::NodeStatus onStart() override {return onRunning();}
+  BT::NodeStatus onRunning() override
+  {
+    return config().blackboard->get<bool>("path_complete") ?
+           BT::NodeStatus::SUCCESS : BT::NodeStatus::RUNNING;
+  }
+  void onHalted() override {}
+};
+
+TEST_F(NavigationEventTest, SendsRawSurroundingsOnceOnlyNearTheFinalWaypoint)
+{
+  using Service = vln_agent::srv::ToolCall;
+  factory.registerFromPlugin(VLN_REPORT_WAYPOINT_PLUGIN_PATH);
+  factory.registerNodeType<TrackPath>("TrackPath");
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  blackboard->set("tf_buffer", tf);
+  blackboard->set("wait_for_service_timeout", 200ms);
+  blackboard->set("waypoint", pose(4, 0, 0));
+  blackboard->set("route_revision", std::uint64_t{1});
+  blackboard->set("path_complete", false);
+  blackboard->set("final", false);
+  auto moveRobot = [&](double x) {
+      geometry_msgs::msg::TransformStamped map_from_robot;
+      map_from_robot.header.frame_id = "map";
+      map_from_robot.child_frame_id = "base_link";
+      map_from_robot.transform.translation.x = x;
+      map_from_robot.transform.rotation.w = 1;
+      ASSERT_TRUE(tf->setTransform(map_from_robot, "fixture", true));
+    };
+  auto bt = factory.createTreeFromText(R"(
+    <root><BehaviorTree ID="Main">
+      <ReportNearWaypoint waypoint="{waypoint}" is_final="{final}" route_revision="{route_revision}"
+                          distance_m="1.0">
+        <TrackPath/>
+        <Sequence>
+          <GetSurroundings service_name="/surroundings_test/tool_call" costmap="local" range_m="6"
+                           output="{surroundings}"/>
+          <SubmitSurroundings name="NearFinal" input="{surroundings}"/>
+        </Sequence>
+      </ReportNearWaypoint>
+    </BehaviorTree></root>)", blackboard);
+
+  auto tool_payload = vln_agent::utils::businessPayload("robot");
+  tool_payload["ok"] = true;
+  tool_payload["data"]["environment_id"] = "env_test";
+  tool_payload["pose"] = vln_agent::utils::posePayload("map", 3.5, 0.0, 0.0);
+  tool_payload["images"] = Json::array({{{"metadata", {{"costmap", "local"}}}}});
+  const Json image{{"type", "input_image"}, {"image_url", "data:image/png;base64,AQID"},
+    {"detail", "high"}};
+  int calls = 0;
+  auto service = node->create_service<Service>(
+    "/surroundings_test/tool_call",
+    [&](Service::Request::SharedPtr request, Service::Response::SharedPtr response) {
+      const auto call = Json::parse(request->request_json).at("output").at(0);
+      EXPECT_EQ(call.at("name"), "get_surroundings");
+      EXPECT_EQ(Json::parse(call.at("arguments").get<std::string>()),
+        (Json{{"costmap", "local"}, {"range_m", 6.0}}));
+      ++calls;
+      response->outputs_json = Json::array({vln_agent::utils::functionCallOutput(
+        call.at("call_id").get<std::string>(), tool_payload, {image})}).dump();
+    });
+
+  moveRobot(3.5);
+  EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::RUNNING);
+  rclcpp::spin_some(node);
+  EXPECT_EQ(calls, 0);
+  blackboard->set("final", true);
+  moveRobot(2.0);
+  EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::RUNNING);
+  rclcpp::spin_some(node);
+  EXPECT_EQ(calls, 0);
+
+  moveRobot(3.5);
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (events.empty() && std::chrono::steady_clock::now() < deadline) {
+    ASSERT_EQ(bt.tickRoot(), BT::NodeStatus::RUNNING);
+    rclcpp::spin_some(node);
+    std::this_thread::sleep_for(2ms);
+  }
+  ASSERT_EQ(calls, 1);
+  ASSERT_EQ(events.size(), 1u);
+  const auto native = blackboard->get<Json>("surroundings");
+  EXPECT_EQ(native.at("type"), "function_call_output");
+  EXPECT_EQ(native.at("output").at(1), image);
+  EXPECT_EQ(events.front().at("content").at(1), image);
+  EXPECT_EQ(payload().at("event"), "surroundings");
+  for (const auto * field : {"data", "pose", "images"}) {
+    EXPECT_EQ(payload().at(field), tool_payload.at(field));
+  }
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::RUNNING);
+    rclcpp::spin_some(node);
+  }
+  EXPECT_EQ(calls, 1);
+  blackboard->set("path_complete", true);
+  EXPECT_EQ(bt.tickRoot(), BT::NodeStatus::SUCCESS);
 }
 }  // namespace vln_behavior_tree::test

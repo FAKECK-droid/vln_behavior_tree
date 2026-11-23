@@ -1,4 +1,6 @@
 #include "vln_behavior_tree/plugins/events/navigation_event.hpp"
+#include "vln_behavior_tree/plugins/events/submit_surroundings.hpp"
+#include "vln_behavior_tree/plugins/tools/get_surroundings.hpp"
 
 #include <chrono>
 #include <mutex>
@@ -96,4 +98,6 @@ EventPayload NavigationEvent::buildPayload()
 BT_REGISTER_NODES(factory)
 {
   factory.registerNodeType<vln_behavior_tree::NavigationEvent>("NavigationEvent");
+  factory.registerNodeType<vln_behavior_tree::GetSurroundings>("GetSurroundings");
+  factory.registerNodeType<vln_behavior_tree::SubmitSurroundings>("SubmitSurroundings");
 }

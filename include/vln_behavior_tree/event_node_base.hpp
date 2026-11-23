@@ -48,6 +48,8 @@ protected:
   EventPayload buildPayload(const ImageContent & images, const std::optional<Pose2D> & pose);
   /** @brief 读取 pose 输入；为空时获取 map 到 base_link 的最新 TF。 */
   std::optional<Pose2D> readPose();
+  /** @brief 预先创建已知话题的发布者，让首条事件发出前完成 DDS 发现。 */
+  void preparePublisher();
 
 private:
   BT::NodeStatus tick() override;

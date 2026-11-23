@@ -151,6 +151,17 @@ EventPayload EventNodeBase::buildPayload(
   return result;
 }
 
+void EventNodeBase::preparePublisher()
+{
+  const auto topic = readInput<std::string>(*this, "topic");
+  if (publisher_ && topic_ == topic) {return;}
+  if (const auto node = node_.lock()) {
+    publisher_ = node->create_publisher<std_msgs::msg::String>(
+      topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
+    topic_ = topic;
+  }
+}
+
 BT::NodeStatus EventNodeBase::tick()
 {
   const auto node = node_.lock();
@@ -169,13 +180,7 @@ BT::NodeStatus EventNodeBase::tick()
     std_msgs::msg::String output;
     output.data = message.dump();
 
-    const auto topic = readInput<std::string>(*this, "topic");
-    if (!publisher_ || topic_ != topic) {
-      auto publisher = node->create_publisher<std_msgs::msg::String>(
-        topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile());
-      publisher_ = std::move(publisher);
-      topic_ = topic;
-    }
+    preparePublisher();
     publisher_->publish(output);
     return BT::NodeStatus::SUCCESS;
   } catch (const std::exception & error) {
