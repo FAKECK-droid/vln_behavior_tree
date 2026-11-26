@@ -1,6 +1,6 @@
 
 <!--
-  Each requested pose is a required waypoint. Replan the current leg at 0.333 Hz.
+  Plan once per waypoint attempt and follow the path until completion or recovery.
   Intermediate arrival uses position only; the final leg also uses the controller goal checker.
 -->
 <root main_tree_to_execute="VlnNavThroughGoals">
@@ -13,44 +13,30 @@
         <Sequence name="NavigateAndReportCompletion">
           <FollowWaypoints goals="{goals}" waypoint="{waypoint}" is_final="{is_final}"
                            route_revision="{route_revision}" path="{path}">
-            <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+            <RecoveryNode number_of_retries="1" name="NavigateRecovery">
               <ReactiveFallback name="CompleteOrFollowWaypoint">
-                <WaypointPositionReached waypoint="{waypoint}" is_final="{is_final}" xy_tolerance="0.30"/>
+                <WaypointPositionReached waypoint="{waypoint}" is_final="{is_final}" xy_tolerance="0.50"/>
                 <Sequence name="FollowAndConfirmWaypoint">
-                  <PipelineSequence name="NavigateWithReplanning">
-                    <RateController hz="0.333">
-                      <RecoveryNode number_of_retries="1" name="ComputeWaypointPath">
-                        <Sequence>
-                          <ComputePathToPose goal="{waypoint}" path="{candidate_path}" planner_id="GridBased"/>
-                          <ValidateWaypointPath waypoint="{waypoint}" candidate_path="{candidate_path}"
-                                                xy_tolerance="0.50" path="{path}"/>
-                        </Sequence>
-                        <Sequence name="PlanningRecoveryWithEvent">
-                          <ForceSuccess>
-                            <NavigationEvent name="ReportGoalsPlanningRecovery" event="navigation_recovery" message="路径规划失败，开始清理全局代价地图。"/>
-                          </ForceSuccess>
-                          <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                        </Sequence>
-                      </RecoveryNode>
-                    </RateController>
-                    <RecoveryNode number_of_retries="1" name="FollowPath">
-                      <ReportNearWaypoint waypoint="{waypoint}" is_final="{is_final}"
-                                          route_revision="{route_revision}" distance_m="1.0">
-                        <FollowPath path="{path}" controller_id="FollowPath"/>
-                        <Sequence name="ReportFinalWaypointSurroundings">
-                          <GetSurroundings costmap="local" range_m="6.0" output="{surroundings}"/>
-                          <SubmitSurroundings name="ReportSurroundingsNearFinalWaypoint" input="{surroundings}"/>
-                        </Sequence>
-                      </ReportNearWaypoint>
-                      <Sequence name="ControlRecoveryWithEvent">
-                        <ForceSuccess>
-                          <NavigationEvent name="ReportGoalsControlRecovery" event="navigation_recovery" message="路径跟踪失败，开始清理局部代价地图。"/>
-                        </ForceSuccess>
-                        <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                  <RecoveryNode number_of_retries="5" name="ComputeWaypointPath">
+                    <Sequence>
+                      <ComputePathToPose goal="{waypoint}" path="{candidate_path}" planner_id="GridBased"/>
+                      <ValidateWaypointPath waypoint="{waypoint}" candidate_path="{candidate_path}"
+                                            xy_tolerance="0.50" path="{path}"/>
+                    </Sequence>
+                    <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                  </RecoveryNode>
+                  <RecoveryNode number_of_retries="5" name="FollowPath">
+                    <ReportNearWaypoint waypoint="{waypoint}" is_final="{is_final}"
+                                        route_revision="{route_revision}" distance_m="2.0">
+                      <FollowPath path="{path}" controller_id="FollowPath"/>
+                      <Sequence name="ReportFinalWaypointSurroundings">
+                        <GetSurroundings costmap="global" range_m="12.0" output="{surroundings}"/>
+                        <SubmitSurroundings name="ReportSurroundingsNearFinalWaypoint" input="{surroundings}"/>
                       </Sequence>
-                    </RecoveryNode>
-                  </PipelineSequence>
-                  <WaypointPositionReached waypoint="{waypoint}" xy_tolerance="0.30"/>
+                    </ReportNearWaypoint>
+                    <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                  </RecoveryNode>
+                  <WaypointPositionReached waypoint="{waypoint}" xy_tolerance="0.50"/>
                 </Sequence>
               </ReactiveFallback>
               <Sequence name="SystemRecoveryWithEvent">

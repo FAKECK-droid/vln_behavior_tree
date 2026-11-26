@@ -402,12 +402,14 @@ TEST_F(LookAroundTest, PlansOnlyToCurrentWaypointUntilRobotEntersItsTolerance)
   const auto goals = blackboard->get<std::vector<Pose>>("goals");
   ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
   ASSERT_EQ(follow_started, 1);
-  const auto deadline = std::chrono::steady_clock::now() + 4s;
-  while (plans.size() == 1 && std::chrono::steady_clock::now() < deadline) {
+  // Stay on the initial plan beyond the previous two-second replan period.
+  const auto deadline = std::chrono::steady_clock::now() + 2200ms;
+  while (std::chrono::steady_clock::now() < deadline) {
     ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
     std::this_thread::sleep_for(10ms);
   }
-  ASSERT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front()}));
+  ASSERT_EQ(plans, std::vector<Pose>{goals.front()});
+  EXPECT_EQ(follow_halted, 0);
   EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), goals);
 
   auto near_first = goals.front();
@@ -416,14 +418,24 @@ TEST_F(LookAroundTest, PlansOnlyToCurrentWaypointUntilRobotEntersItsTolerance)
   ASSERT_EQ(tree.tickRoot(), BT::NodeStatus::RUNNING);
   EXPECT_EQ(follow_halted, 1);
   EXPECT_EQ(blackboard->get<std::vector<Pose>>("goals"), std::vector<Pose>{goals.back()});
-  ASSERT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front()}));
+  ASSERT_EQ(plans, std::vector<Pose>{goals.front()});
 
   hold_follow = false;
   ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
-  EXPECT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front(), goals.back()}));
+  EXPECT_EQ(plans, goals);
   EXPECT_EQ(follow_completed, 1);
   EXPECT_TRUE(blackboard->get<std::vector<Pose>>("goals").empty());
   EXPECT_EQ(blackboard->get<nav_msgs::msg::Path>("path").poses.back(), goals.back());
+}
+
+TEST_F(LookAroundTest, ExhaustedControlRetriesReplanFromTheSameWaypoint)
+{
+  follow_failures = 2;
+  auto tree = navigation(true);
+  const auto goals = blackboard->get<std::vector<Pose>>("goals");
+  ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(plans, (std::vector<Pose>{goals.front(), goals.front(), goals.back()}));
+  EXPECT_EQ(follow_completed, 2);
 }
 
 TEST_F(LookAroundTest, RejectsDisplacedPlannerEndpointBeforeStartingControl)
@@ -492,36 +504,45 @@ TEST_P(NavigationTreesTest, ReportsStartAndCompletionOnceAcrossRunningTicksWitho
   expectNavigationPayloads();
 }
 
-TEST_P(NavigationTreesTest, PlanningRecoveryReportsOnceThenSuccessfulRetryCompletes)
+TEST_P(NavigationTreesTest, ContextualPlanningRetryCompletesWithConfiguredEvents)
 {
   planning_failures = 1;
   auto tree = navigation(GetParam());
   ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent("navigation_completed"));
-  ASSERT_TRUE(awaitEvent("navigation_recovery"));
   EXPECT_EQ(eventCount("navigation_started"), 1);
   EXPECT_EQ(eventCount("navigation_completed"), 1);
-  EXPECT_EQ(eventCount("navigation_recovery"), 1);
   EXPECT_EQ(eventCount("navigation_failed"), 0);
-  EXPECT_NE(
-    payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
-      "PlanningRecovery"), std::string::npos);
+  // The board's multi-goal tree reports only system recovery.
+  if (GetParam()) {
+    EXPECT_EQ(eventCount("navigation_recovery"), 0);
+  } else {
+    ASSERT_TRUE(awaitEvent("navigation_recovery"));
+    EXPECT_EQ(eventCount("navigation_recovery"), 1);
+    EXPECT_NE(
+      payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
+        "PlanningRecovery"), std::string::npos);
+  }
   EXPECT_EQ(plans.size(), GetParam() ? 3u : 2u);
   expectNavigationPayloads();
 }
 
-TEST_P(NavigationTreesTest, ControllerRecoveryReportsOnceThenSuccessfulRetryCompletes)
+TEST_P(NavigationTreesTest, ContextualControlRetryCompletesWithConfiguredEvents)
 {
   follow_failures = 1;
   auto tree = navigation(GetParam());
   ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent("navigation_completed"));
-  ASSERT_TRUE(awaitEvent("navigation_recovery"));
-  EXPECT_EQ(eventCount("navigation_recovery"), 1);
   EXPECT_EQ(eventCount("navigation_failed"), 0);
-  EXPECT_NE(
-    payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
-      "ControlRecovery"), std::string::npos);
+  if (GetParam()) {
+    EXPECT_EQ(eventCount("navigation_recovery"), 0);
+  } else {
+    ASSERT_TRUE(awaitEvent("navigation_recovery"));
+    EXPECT_EQ(eventCount("navigation_recovery"), 1);
+    EXPECT_NE(
+      payload(findEvent("navigation_recovery")).at("origin").get<std::string>().find(
+        "ControlRecovery"), std::string::npos);
+  }
   EXPECT_EQ(follow_started, GetParam() ? 3 : 2);
   EXPECT_EQ(follow_completed, GetParam() ? 2 : 1);
   expectNavigationPayloads();
@@ -533,8 +554,9 @@ TEST_P(NavigationTreesTest, SystemRecoveryAfterContextualRetryExhaustionIsReport
   auto tree = navigation(GetParam());
   ASSERT_EQ(finish(tree), BT::NodeStatus::SUCCESS);
   ASSERT_TRUE(awaitEvent("navigation_completed"));
-  ASSERT_TRUE(awaitEvent("navigation_recovery", 2));
-  EXPECT_EQ(eventCount("navigation_recovery"), 2);
+  const auto expected_events = GetParam() ? 1u : 2u;
+  ASSERT_TRUE(awaitEvent("navigation_recovery", expected_events));
+  EXPECT_EQ(eventCount("navigation_recovery"), expected_events);
   bool found_system_recovery = false;
   for (const auto & message : events) {
     found_system_recovery |=
